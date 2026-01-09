@@ -702,7 +702,15 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 #define TCG_SVM_FEATURES (CPUID_SVM_NPT | CPUID_SVM_VGIF | \
           CPUID_SVM_SVME_ADDR_CHK | CPUID_SVM_KERNEL_FEATURES)
 
-#define TCG_KVM_FEATURES 0
+/*
+ * TCG KVM paravirt features - enable kvmclock for faster time access
+ * KVM_FEATURE_CLOCKSOURCE (bit 0) - basic kvmclock
+ * KVM_FEATURE_CLOCKSOURCE2 (bit 3) - newer MSRs
+ * KVM_FEATURE_CLOCKSOURCE_STABLE_BIT (bit 24) - enables vDSO usage
+ */
+#define TCG_KVM_FEATURES ((1 << KVM_FEATURE_CLOCKSOURCE) | \
+                          (1 << KVM_FEATURE_CLOCKSOURCE2) | \
+                          (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT))
 
 #if defined CONFIG_USER_ONLY
 #define CPUID_7_0_EBX_KERNEL_FEATURES CPUID_7_0_EBX_INVPCID
@@ -6464,12 +6472,14 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
     }
     case 0x40000000:
         /*
-         * CPUID code in kvm_arch_init_vcpu() ignores stuff
-         * set here, but we restrict to TCG none the less.
+         * Hypervisor CPUID leaf - expose KVM signature for kvmclock support.
+         * This allows the guest to detect kvmclock and use vDSO for fast
+         * clock_gettime() without syscall overhead.
          */
-        if (tcg_enabled() && cpu->expose_tcg) {
-            memcpy(signature, "TCGTCGTCGTCG", 12);
-            *eax = 0x40000001;
+        if (tcg_enabled()) {
+            /* Use KVM signature so guest enables kvmclock */
+            memcpy(signature, "KVMKVMKVM\0\0\0", 12);
+            *eax = 0x40000001;  /* Max leaf */
             *ebx = signature[0];
             *ecx = signature[1];
             *edx = signature[2];
@@ -6481,10 +6491,22 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         }
         break;
     case 0x40000001:
-        *eax = 0;
-        *ebx = 0;
-        *ecx = 0;
-        *edx = 0;
+        /*
+         * KVM features leaf - return kvmclock features for TCG.
+         * Enables paravirtualized clock for faster time access.
+         */
+        if (tcg_enabled()) {
+            /* Hardcode kvmclock features - env->features[FEAT_KVM] may be 0 */
+            *eax = TCG_KVM_FEATURES;
+            *ebx = 0;
+            *ecx = 0;
+            *edx = 0;
+        } else {
+            *eax = 0;
+            *ebx = 0;
+            *ecx = 0;
+            *edx = 0;
+        }
         break;
     case 0x80000000:
         *eax = env->cpuid_xlevel;
@@ -7043,7 +7065,14 @@ void x86_cpu_expand_features(X86CPU *cpu, Error **errp)
     }
 
     if (!kvm_enabled() || !cpu->expose_kvm) {
-        env->features[FEAT_KVM] = 0;
+        /*
+         * For TCG, we expose kvmclock features to enable paravirtualized
+         * time access (vDSO). Only clear KVM features if TCG doesn't
+         * want to expose them.
+         */
+        if (!tcg_enabled() || !TCG_KVM_FEATURES) {
+            env->features[FEAT_KVM] = 0;
+        }
     }
 
     x86_cpu_enable_xsave_components(cpu);
