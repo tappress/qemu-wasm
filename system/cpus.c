@@ -65,6 +65,10 @@
 
 #endif /* CONFIG_LINUX */
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 static QemuMutex qemu_global_mutex;
 
 /*
@@ -428,6 +432,19 @@ void qemu_wait_io_event(CPUState *cpu)
             slept = true;
             qemu_plugin_vcpu_idle_cb(cpu);
         }
+#ifdef __EMSCRIPTEN__
+        /*
+         * Yield to browser event loop to allow timer callbacks and other
+         * events to be processed. This reduces CPU usage when guest is idle
+         * and ensures interrupts can be delivered properly.
+         */
+        qemu_mutex_unlock(&qemu_global_mutex);
+        emscripten_sleep(1);
+        qemu_mutex_lock(&qemu_global_mutex);
+        if (!cpu_thread_is_idle(cpu)) {
+            break;
+        }
+#endif
         qemu_cond_wait(cpu->halt_cond, &qemu_global_mutex);
     }
     if (slept) {

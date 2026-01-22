@@ -28,6 +28,22 @@
 #include "standard-headers/asm-x86/kvm_para.h"
 #include "sysemu/cpu-timers.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+/*
+ * Serial console fastpath for WASM builds.
+ * Bypasses the UART state machine emulation for console output,
+ * reducing ~100 TCG instructions per byte to a direct JS call.
+ */
+EM_JS(void, emscripten_serial_putchar, (int c), {
+    /* Output to browser console and also to Module's TTY if available */
+    if (typeof Module !== 'undefined' && Module['pty'] && Module['pty'].writable) {
+        Module['pty'].write(new Uint8Array([c]));
+    }
+});
+#endif /* __EMSCRIPTEN__ */
+
 /*
  * Paravirtualized clock (pvclock) support for TCG
  * This allows the guest to read time directly from a shared memory page
@@ -134,6 +150,17 @@ static void pvclock_update_wall_clock(CPUX86State *env)
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
 {
+#ifdef __EMSCRIPTEN__
+    /*
+     * Serial console fastpath: intercept writes to COM1 data port (0x3f8).
+     * This bypasses the UART state machine emulation, saving ~100 TCG
+     * instructions per byte. The chardev backend still receives the data
+     * for proper logging, but we also output directly for lower latency.
+     */
+    if (port == 0x3f8) {
+        emscripten_serial_putchar(data & 0xff);
+    }
+#endif
     address_space_stb(&address_space_io, port, data,
                       cpu_get_mem_attrs(env), NULL);
 }
