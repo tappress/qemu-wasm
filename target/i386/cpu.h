@@ -1716,6 +1716,10 @@ typedef struct CPUArchState {
     uint64_t pv_eoi_en_msr;
     uint64_t poll_control_msr;
 
+    /* Paravirtualized filesystem MSRs */
+    uint64_t pv_fs_ctrl;    /* GPA of shared request page | enabled bit */
+    uint64_t pv_fs_status;  /* Status of last operation */
+
     /* Partition-wide HV MSRs, will be updated only on the first vcpu */
     uint64_t msr_hv_hypercall;
     uint64_t msr_hv_guest_os_id;

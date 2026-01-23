@@ -36,6 +36,7 @@
 #define KVM_FEATURE_MSI_EXT_DEST_ID	15
 #define KVM_FEATURE_HC_MAP_GPA_RANGE	16
 #define KVM_FEATURE_MIGRATION_CONTROL	17
+#define KVM_FEATURE_PV_FS		18  /* Paravirtualized filesystem I/O */
 
 #define KVM_HINTS_REALTIME      0
 
@@ -58,6 +59,31 @@
 #define MSR_KVM_ASYNC_PF_INT	0x4b564d06
 #define MSR_KVM_ASYNC_PF_ACK	0x4b564d07
 #define MSR_KVM_MIGRATION_CONTROL	0x4b564d08
+#define MSR_KVM_PV_FS_CTRL		0x4b564d10  /* PV filesystem control */
+#define MSR_KVM_PV_FS_REQUEST		0x4b564d11  /* PV filesystem request trigger */
+#define MSR_KVM_PV_FS_STATUS		0x4b564d12  /* PV filesystem status */
+
+/* PVFS operation codes */
+#define PVFS_OP_READ		1
+#define PVFS_OP_WRITE		2
+#define PVFS_OP_STAT		3
+#define PVFS_OP_OPEN		4
+#define PVFS_OP_CLOSE		5
+#define PVFS_OP_READDIR		6
+
+/* PVFS request structure (guest allocates, passes GPA via MSR_KVM_PV_FS_CTRL) */
+struct kvm_pv_fs_request {
+	uint32_t op;		/* PVFS_OP_* */
+	uint32_t flags;
+	uint64_t handle;	/* File handle (from PVFS_OP_OPEN) */
+	uint64_t offset;	/* File offset */
+	uint64_t buf_gpa;	/* Guest physical address of data buffer */
+	uint64_t count;		/* Bytes to read/write, or path length */
+	int64_t  result;	/* Return value (set by host) */
+	uint32_t error;		/* errno (set by host) */
+	uint32_t pad;
+	char path[256];		/* File path for OPEN/STAT operations */
+};
 
 struct kvm_steal_time {
 	uint64_t steal;

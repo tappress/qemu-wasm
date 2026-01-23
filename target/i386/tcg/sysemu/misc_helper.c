@@ -20,6 +20,10 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include "exec/helper-proto.h"
 #include "exec/cpu_ldst.h"
 #include "exec/address-spaces.h"
@@ -118,6 +122,248 @@ static void pvclock_update_time(CPUX86State *env)
  * Update the wall clock shared page with boot time.
  * This is called when the guest writes to MSR_KVM_WALL_CLOCK.
  */
+static void pvclock_update_wall_clock(CPUX86State *env);
+
+/*
+ * Paravirtualized filesystem (PVFS) support
+ * Allows guest to perform file I/O via MSR hypercalls, bypassing
+ * the virtio-9p protocol overhead for faster file operations.
+ */
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+/*
+ * Emscripten filesystem bridge functions.
+ * These interface directly with the browser's MEMFS via Emscripten FS API.
+ */
+EM_JS(int64_t, emscripten_pvfs_open, (const char *path, int flags), {
+    try {
+        var pathStr = UTF8ToString(path);
+        var fd = FS.open(pathStr, flags === 0 ? 'r' : (flags === 1 ? 'w' : 'r+'));
+        return fd.fd;
+    } catch (e) {
+        return -1;
+    }
+});
+
+EM_JS(int64_t, emscripten_pvfs_read, (int fd, void *buf, size_t count), {
+    try {
+        var stream = FS.getStream(fd);
+        if (!stream) return -1;
+        var bytesRead = FS.read(stream, HEAP8, buf, count);
+        return bytesRead;
+    } catch (e) {
+        return -1;
+    }
+});
+
+EM_JS(int64_t, emscripten_pvfs_write, (int fd, const void *buf, size_t count), {
+    try {
+        var stream = FS.getStream(fd);
+        if (!stream) return -1;
+        var bytesWritten = FS.write(stream, HEAP8, buf, count);
+        return bytesWritten;
+    } catch (e) {
+        return -1;
+    }
+});
+
+EM_JS(int, emscripten_pvfs_close, (int fd), {
+    try {
+        var stream = FS.getStream(fd);
+        if (!stream) return -1;
+        FS.close(stream);
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+
+EM_JS(int64_t, emscripten_pvfs_stat, (const char *path, uint64_t *size, uint32_t *mode), {
+    try {
+        var pathStr = UTF8ToString(path);
+        var stat = FS.stat(pathStr);
+        HEAPU32[size >> 2] = stat.size;
+        HEAPU32[(size >> 2) + 1] = 0;  /* High 32 bits */
+        HEAPU32[mode >> 2] = stat.mode;
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+#endif /* __EMSCRIPTEN__ */
+
+/*
+ * Handle a PVFS request from the guest.
+ * Reads the request structure from guest memory, performs the operation,
+ * and writes the result back.
+ */
+static void pv_fs_handle_request(CPUX86State *env)
+{
+    struct kvm_pv_fs_request req;
+    hwaddr req_gpa;
+    uint8_t *buf = NULL;
+
+    if (!(env->pv_fs_ctrl & KVM_MSR_ENABLED)) {
+        env->pv_fs_status = 0;
+        return;
+    }
+
+    /* Get the guest physical address of the request structure */
+    req_gpa = env->pv_fs_ctrl & ~0xFFFULL;  /* Page-aligned */
+
+    /* Read the request from guest memory */
+    cpu_physical_memory_read(req_gpa, &req, sizeof(req));
+
+    /* Initialize result */
+    req.result = -1;
+    req.error = 22;  /* EINVAL */
+
+    switch (req.op) {
+#ifdef __EMSCRIPTEN__
+    case PVFS_OP_OPEN:
+        /* Open a file by path */
+        req.result = emscripten_pvfs_open(req.path, req.flags);
+        if (req.result >= 0) {
+            req.error = 0;
+        }
+        break;
+
+    case PVFS_OP_READ:
+        /* Read from an open file handle */
+        if (req.count > 0 && req.count <= (64 * 1024)) {
+            buf = g_malloc(req.count);
+            if (buf) {
+                req.result = emscripten_pvfs_read(req.handle, buf, req.count);
+                if (req.result > 0) {
+                    /* Copy data to guest buffer */
+                    cpu_physical_memory_write(req.buf_gpa, buf, req.result);
+                    req.error = 0;
+                } else if (req.result == 0) {
+                    req.error = 0;  /* EOF */
+                }
+                g_free(buf);
+            }
+        }
+        break;
+
+    case PVFS_OP_WRITE:
+        /* Write to an open file handle */
+        if (req.count > 0 && req.count <= (64 * 1024)) {
+            buf = g_malloc(req.count);
+            if (buf) {
+                /* Read data from guest buffer */
+                cpu_physical_memory_read(req.buf_gpa, buf, req.count);
+                req.result = emscripten_pvfs_write(req.handle, buf, req.count);
+                if (req.result >= 0) {
+                    req.error = 0;
+                }
+                g_free(buf);
+            }
+        }
+        break;
+
+    case PVFS_OP_CLOSE:
+        req.result = emscripten_pvfs_close(req.handle);
+        req.error = (req.result == 0) ? 0 : 9;  /* EBADF */
+        break;
+
+    case PVFS_OP_STAT:
+        {
+            uint64_t size = 0;
+            uint32_t mode = 0;
+            req.result = emscripten_pvfs_stat(req.path, &size, &mode);
+            if (req.result == 0) {
+                req.count = size;  /* Reuse count field for size */
+                req.flags = mode;  /* Reuse flags field for mode */
+                req.error = 0;
+            }
+        }
+        break;
+#else
+    /* Native QEMU: Use standard POSIX file operations for testing */
+    case PVFS_OP_OPEN:
+        {
+            int flags = (req.flags == 0) ? O_RDONLY :
+                       (req.flags == 1) ? (O_WRONLY | O_CREAT) :
+                       (O_RDWR | O_CREAT);
+            int fd = open(req.path, flags, 0644);
+            req.result = fd;
+            req.error = (fd >= 0) ? 0 : errno;
+        }
+        break;
+
+    case PVFS_OP_READ:
+        if (req.count > 0 && req.count <= (64 * 1024)) {
+            buf = g_malloc(req.count);
+            if (buf) {
+                ssize_t n = pread(req.handle, buf, req.count, req.offset);
+                if (n >= 0) {
+                    cpu_physical_memory_write(req.buf_gpa, buf, n);
+                    req.result = n;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = errno;
+                }
+                g_free(buf);
+            }
+        }
+        break;
+
+    case PVFS_OP_WRITE:
+        if (req.count > 0 && req.count <= (64 * 1024)) {
+            buf = g_malloc(req.count);
+            if (buf) {
+                cpu_physical_memory_read(req.buf_gpa, buf, req.count);
+                ssize_t n = pwrite(req.handle, buf, req.count, req.offset);
+                if (n >= 0) {
+                    req.result = n;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = errno;
+                }
+                g_free(buf);
+            }
+        }
+        break;
+
+    case PVFS_OP_CLOSE:
+        req.result = close(req.handle);
+        req.error = (req.result == 0) ? 0 : errno;
+        break;
+
+    case PVFS_OP_STAT:
+        {
+            struct stat st;
+            if (stat(req.path, &st) == 0) {
+                req.count = st.st_size;
+                req.flags = st.st_mode;
+                req.result = 0;
+                req.error = 0;
+            } else {
+                req.result = -1;
+                req.error = errno;
+            }
+        }
+        break;
+#endif /* __EMSCRIPTEN__ */
+
+    default:
+        req.result = -1;
+        req.error = 38;  /* ENOSYS */
+        break;
+    }
+
+    /* Write result back to guest memory */
+    cpu_physical_memory_write(req_gpa, &req, sizeof(req));
+
+    /* Set status: 1 = success, 0 = error */
+    env->pv_fs_status = (req.result >= 0 || req.error == 0) ? 1 : 0;
+}
+
 static void pvclock_update_wall_clock(CPUX86State *env)
 {
     struct pvclock_wall_clock wc;
@@ -435,6 +681,16 @@ void helper_wrmsr(CPUX86State *env)
         env->wall_clock_msr = val;
         pvclock_update_wall_clock(env);
         break;
+    /* Paravirtualized filesystem MSRs */
+    case MSR_KVM_PV_FS_CTRL:
+        env->pv_fs_ctrl = val;
+        break;
+    case MSR_KVM_PV_FS_REQUEST:
+        /* Trigger a filesystem operation */
+        if (env->pv_fs_ctrl & KVM_MSR_ENABLED) {
+            pv_fs_handle_request(env);
+        }
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
@@ -609,6 +865,13 @@ void helper_rdmsr(CPUX86State *env)
     case MSR_KVM_WALL_CLOCK:
     case MSR_KVM_WALL_CLOCK_NEW:
         val = env->wall_clock_msr;
+        break;
+    /* Paravirtualized filesystem MSRs */
+    case MSR_KVM_PV_FS_CTRL:
+        val = env->pv_fs_ctrl;
+        break;
+    case MSR_KVM_PV_FS_STATUS:
+        val = env->pv_fs_status;
         break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL

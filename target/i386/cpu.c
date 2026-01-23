@@ -707,10 +707,12 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
  * KVM_FEATURE_CLOCKSOURCE (bit 0) - basic kvmclock
  * KVM_FEATURE_CLOCKSOURCE2 (bit 3) - newer MSRs
  * KVM_FEATURE_CLOCKSOURCE_STABLE_BIT (bit 24) - enables vDSO usage
+ * KVM_FEATURE_PV_FS (bit 18) - paravirtualized filesystem I/O
  */
 #define TCG_KVM_FEATURES ((1 << KVM_FEATURE_CLOCKSOURCE) | \
                           (1 << KVM_FEATURE_CLOCKSOURCE2) | \
-                          (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT))
+                          (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT) | \
+                          (1 << KVM_FEATURE_PV_FS))
 
 #if defined CONFIG_USER_ONLY
 #define CPUID_7_0_EBX_KERNEL_FEATURES CPUID_7_0_EBX_INVPCID
