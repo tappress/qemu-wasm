@@ -130,72 +130,11 @@ static void pvclock_update_wall_clock(CPUX86State *env);
  * the virtio-9p protocol overhead for faster file operations.
  */
 
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-
 /*
- * Emscripten filesystem bridge functions.
- * These interface directly with the browser's MEMFS via Emscripten FS API.
+ * Note: PVFS operations use standard POSIX file I/O (stat, open, read, etc.)
+ * for both native and Emscripten builds. Emscripten automatically proxies
+ * these syscalls to the main thread when using PROXY_TO_PTHREAD.
  */
-EM_JS(int, emscripten_pvfs_open, (const char *path, int flags), {
-    try {
-        var pathStr = UTF8ToString(path);
-        var fd = FS.open(pathStr, flags === 0 ? 'r' : (flags === 1 ? 'w' : 'r+'));
-        return fd.fd;
-    } catch (e) {
-        return -1;
-    }
-});
-
-EM_JS(int, emscripten_pvfs_read, (int fd, void *buf, int count), {
-    try {
-        var stream = FS.getStream(fd);
-        if (!stream) return -1;
-        var bytesRead = FS.read(stream, HEAP8, buf, count);
-        return bytesRead;
-    } catch (e) {
-        return -1;
-    }
-});
-
-EM_JS(int, emscripten_pvfs_write, (int fd, const void *buf, int count), {
-    try {
-        var stream = FS.getStream(fd);
-        if (!stream) return -1;
-        var bytesWritten = FS.write(stream, HEAP8, buf, count);
-        return bytesWritten;
-    } catch (e) {
-        return -1;
-    }
-});
-
-EM_JS(int, emscripten_pvfs_close, (int fd), {
-    try {
-        var stream = FS.getStream(fd);
-        if (!stream) return -1;
-        FS.close(stream);
-        return 0;
-    } catch (e) {
-        return -1;
-    }
-});
-
-EM_JS(int, emscripten_pvfs_stat, (const char *path, uint32_t *size_lo, uint32_t *size_hi, uint32_t *mode), {
-    try {
-        var pathStr = UTF8ToString(path);
-        console.log('[PVFS] stat:', pathStr);
-        var stat = FS.stat(pathStr);
-        console.log('[PVFS] stat success:', pathStr, 'size:', stat.size);
-        HEAPU32[size_lo >> 2] = stat.size & 0xFFFFFFFF;
-        HEAPU32[size_hi >> 2] = (stat.size / 0x100000000) >>> 0;
-        HEAPU32[mode >> 2] = stat.mode;
-        return 0;
-    } catch (e) {
-        console.log('[PVFS] stat failed:', pathStr, e.message);
-        return -1;
-    }
-});
-#endif /* __EMSCRIPTEN__ */
 
 /*
  * Handle a PVFS request from the guest.
@@ -224,68 +163,6 @@ static void pv_fs_handle_request(CPUX86State *env)
     req.error = 22;  /* EINVAL */
 
     switch (req.op) {
-#ifdef __EMSCRIPTEN__
-    case PVFS_OP_OPEN:
-        /* Open a file by path */
-        req.result = emscripten_pvfs_open(req.path, req.flags);
-        if (req.result >= 0) {
-            req.error = 0;
-        }
-        break;
-
-    case PVFS_OP_READ:
-        /* Read from an open file handle */
-        if (req.count > 0 && req.count <= (64 * 1024)) {
-            buf = g_malloc(req.count);
-            if (buf) {
-                req.result = emscripten_pvfs_read(req.handle, buf, req.count);
-                if (req.result > 0) {
-                    /* Copy data to guest buffer */
-                    cpu_physical_memory_write(req.buf_gpa, buf, req.result);
-                    req.error = 0;
-                } else if (req.result == 0) {
-                    req.error = 0;  /* EOF */
-                }
-                g_free(buf);
-            }
-        }
-        break;
-
-    case PVFS_OP_WRITE:
-        /* Write to an open file handle */
-        if (req.count > 0 && req.count <= (64 * 1024)) {
-            buf = g_malloc(req.count);
-            if (buf) {
-                /* Read data from guest buffer */
-                cpu_physical_memory_read(req.buf_gpa, buf, req.count);
-                req.result = emscripten_pvfs_write(req.handle, buf, req.count);
-                if (req.result >= 0) {
-                    req.error = 0;
-                }
-                g_free(buf);
-            }
-        }
-        break;
-
-    case PVFS_OP_CLOSE:
-        req.result = emscripten_pvfs_close(req.handle);
-        req.error = (req.result == 0) ? 0 : 9;  /* EBADF */
-        break;
-
-    case PVFS_OP_STAT:
-        {
-            uint32_t size_lo = 0, size_hi = 0;
-            uint32_t mode = 0;
-            req.result = emscripten_pvfs_stat(req.path, &size_lo, &size_hi, &mode);
-            if (req.result == 0) {
-                req.count = ((uint64_t)size_hi << 32) | size_lo;
-                req.flags = mode;
-                req.error = 0;
-            }
-        }
-        break;
-#else
-    /* Native QEMU: Use standard POSIX file operations for testing */
     case PVFS_OP_OPEN:
         {
             int flags = (req.flags == 0) ? O_RDONLY :
@@ -352,7 +229,6 @@ static void pv_fs_handle_request(CPUX86State *env)
             }
         }
         break;
-#endif /* __EMSCRIPTEN__ */
 
     default:
         req.result = -1;
