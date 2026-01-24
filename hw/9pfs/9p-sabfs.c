@@ -19,17 +19,25 @@
 
 /* Check if SABFS module is loaded and available */
 EM_JS(int, sabfs_js_is_available, (void), {
-    return (typeof SABFS !== 'undefined' &&
+    const available = (typeof SABFS !== 'undefined' &&
             typeof SABFS.stat === 'function') ? 1 : 0;
+    console.log('[SABFS C] is_available:', available);
+    return available;
 });
 
 /* Check if SABFS is initialized with data */
 EM_JS(int, sabfs_js_is_ready, (void), {
-    if (typeof SABFS === 'undefined') return 0;
+    if (typeof SABFS === 'undefined') {
+        console.log('[SABFS C] is_ready: SABFS undefined');
+        return 0;
+    }
     try {
         const st = SABFS.stat('/pack');
-        return st ? 1 : 0;
+        const ready = st ? 1 : 0;
+        console.log('[SABFS C] is_ready:', ready, 'stat:', st);
+        return ready;
     } catch (e) {
+        console.log('[SABFS C] is_ready: error', e.message);
         return 0;
     }
 });
@@ -38,10 +46,12 @@ EM_JS(int, sabfs_js_is_ready, (void), {
 EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
     try {
         const pathStr = UTF8ToString(path);
+        console.log('[SABFS C] open:', pathStr, 'flags:', flags);
         const fd = SABFS.open(pathStr, flags, mode);
+        console.log('[SABFS C] open result fd:', fd);
         return fd;
     } catch (e) {
-        console.error('[SABFS] open failed:', e);
+        console.error('[SABFS C] open failed:', pathStr, e);
         return -1;
     }
 });
