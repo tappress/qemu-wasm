@@ -294,14 +294,14 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char path[512];
             read_guest_string(env, arg1, path, sizeof(path));
 
-            /* Only intercept /mnt/pvfs paths */
-            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+            /* Only intercept /mnt/wasi1 paths (9p mount point users access) */
+            if (strncmp(path, "/mnt/wasi1/", 11) != 0) {
                 return 0;  /* Let kernel handle it */
             }
 
-            /* Translate /mnt/pvfs/foo → /pack/foo */
+            /* Translate /mnt/wasi1/foo → /pack/foo */
             char sabfs_path[512];
-            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 11);
 
             int sabfs_fd = syscall_sabfs_open(sabfs_path, arg2);
             if (sabfs_fd < 0) {
@@ -393,13 +393,13 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char path[512];
             read_guest_string(env, arg1, path, sizeof(path));
 
-            /* Only intercept /mnt/pvfs paths */
-            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+            /* Only intercept /mnt/wasi1 paths */
+            if (strncmp(path, "/mnt/wasi1/", 11) != 0) {
                 return 0;
             }
 
             char sabfs_path[512];
-            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 11);
 
             /* arg2 = statbuf pointer */
             uint8_t statbuf[144];
@@ -453,13 +453,13 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 return 0;  /* Relative to non-cwd fd, let kernel handle */
             }
 
-            /* Only intercept /mnt/pvfs paths */
-            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+            /* Only intercept /mnt/wasi1 paths */
+            if (strncmp(path, "/mnt/wasi1/", 11) != 0) {
                 return 0;
             }
 
             char sabfs_path[512];
-            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 11);
 
             int sabfs_fd = syscall_sabfs_open(sabfs_path, arg3);
             if (sabfs_fd < 0) {
