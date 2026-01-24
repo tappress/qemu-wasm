@@ -189,68 +189,171 @@ static int read_guest_string(CPUX86State *env, uint64_t guest_addr, char *buf, i
 #define SYS_wait4       61
 #define SYS_exit_group  231
 
-/* Check if PVPROC is available (syscall interception version) */
+/*
+ * PVPROC SharedArrayBuffer-based IPC with main thread
+ * Similar to SABFS - workers communicate via SAB and Atomics
+ *
+ * SAB Layout (512 bytes per slot):
+ *   0: Control (0=idle, 1=request, 2=response)
+ *   4: Operation (1=fork, 2=exec, 3=exit, 4=wait)
+ *   8: Arg1 (parent_pid)
+ *  12: Arg2 (flags/status)
+ *  16: Arg3 (options)
+ *  20: Result
+ *  24: Error
+ *  32: Path (256 bytes)
+ */
+
+/* Check if PVPROC SAB is available, initialize on first call */
 EM_JS(int, syscall_pvproc_available, (void), {
-    return (typeof Module !== 'undefined' &&
-            Module.pvProc &&
-            typeof Module.pvProc.fork === 'function') ? 1 : 0;
-});
+    /* Initialize on first call */
+    if (typeof Module._pvprocInitDone === 'undefined') {
+        Module._pvprocInitDone = true;
+        Module._pvprocSAB = null;
+        Module._pvprocView = null;
 
-/* Fork/clone - returns child PID to parent, 0 to child */
-EM_JS(int, syscall_pvproc_fork, (int flags), {
-    if (!Module.pvProc) return -1;
-    try {
-        const result = Module.pvProc.fork(0, flags);
-        console.log('[PVPROC-SYSCALL] fork result=' + JSON.stringify(result));
-        return result.pid || -1;  /* JS fork() returns {pid: ...} */
-    } catch (e) {
-        console.error('[PVPROC-SYSCALL] fork error:', e);
-        return -1;
-    }
-});
+        /* In worker: request buffer from main thread */
+        if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
+            self.postMessage({ cmd: 'PVPROC_REQUEST' });
+            console.log('[PVPROC Worker] Requested buffer from main thread');
 
-/* Execve - load and execute program */
-EM_JS(int, syscall_pvproc_execve, (const char *path, uint64_t argv, uint64_t envp), {
-    if (!Module.pvProc) return -1;
-    try {
-        const pathStr = UTF8ToString(path);
-        console.log('[PVPROC-SYSCALL] execve path=' + pathStr);
-
-        /* For now, just log - full implementation would load ELF */
-        const result = Module.pvProc.exec(pathStr, 0);
-        if (result && result.entryPoint) {
-            console.log('[PVPROC-SYSCALL] execve loaded: entry=0x' + result.entryPoint.toString(16));
-            return 0;
+            /* Listen for buffer */
+            self.addEventListener('message', function(e) {
+                if (e.data && e.data.cmd === 'PVPROC_BUFFER' && e.data.buffer instanceof SharedArrayBuffer) {
+                    Module._pvprocSAB = e.data.buffer;
+                    Module._pvprocView = new Int32Array(e.data.buffer);
+                    console.log('[PVPROC Worker] Attached to shared buffer');
+                }
+            });
         }
-        return -1;
-    } catch (e) {
-        console.error('[PVPROC-SYSCALL] execve error:', e);
-        return -1;
     }
+    return (Module._pvprocSAB && Module._pvprocView) ? 1 : 0;
 });
 
-/* Exit - notify process exit */
+/* Fork/clone via SAB IPC - returns child PID */
+EM_JS(int, syscall_pvproc_fork, (int flags), {
+    if (!Module._pvprocSAB || !Module._pvprocView) return -1;
+
+    const view = Module._pvprocView;
+    const SLOT_SIZE = 128;  /* 512 bytes / 4 */
+    const slot = 0;  /* Use slot 0 for now */
+    const base = slot * SLOT_SIZE;
+
+    /* Write request */
+    view[base + 1] = 1;  /* OP_FORK */
+    view[base + 2] = 0;  /* parent_pid (TODO: get real) */
+    view[base + 3] = flags;
+
+    /* Signal request */
+    Atomics.store(view, base, 1);
+    Atomics.notify(view, base, 1);
+
+    /* Wait for response (5 second timeout) */
+    const result = Atomics.wait(view, base, 1, 5000);
+    if (result === 'timed-out') {
+        console.error('[PVPROC] Fork timed out');
+        Atomics.store(view, base, 0);
+        return -110;
+    }
+
+    /* Read response */
+    const childPid = view[base + 5];
+    const error = view[base + 6];
+
+    /* Reset to idle */
+    Atomics.store(view, base, 0);
+
+    if (error) return error;
+    return childPid;
+});
+
+/* Execve via SAB IPC */
+EM_JS(int, syscall_pvproc_execve, (const char *path, uint64_t argv, uint64_t envp), {
+    if (!Module._pvprocSAB || !Module._pvprocView) return -1;
+
+    const view = Module._pvprocView;
+    const pathStr = UTF8ToString(path);
+    const SLOT_SIZE = 128;
+    const slot = 0;
+    const base = slot * SLOT_SIZE;
+
+    /* Write path string (starts at offset 32 bytes = 8 words) */
+    const pathBytes = new TextEncoder().encode(pathStr);
+    const pathView = new Uint8Array(Module._pvprocSAB, slot * 512 + 32, 256);
+    pathView.fill(0);
+    pathView.set(pathBytes.subarray(0, Math.min(pathBytes.length, 255)));
+
+    /* Write request */
+    view[base + 1] = 2;  /* OP_EXEC */
+    view[base + 2] = 0;  /* pid */
+
+    /* Signal request */
+    Atomics.store(view, base, 1);
+    Atomics.notify(view, base, 1);
+
+    /* Wait for response */
+    const result = Atomics.wait(view, base, 1, 5000);
+    if (result === 'timed-out') {
+        Atomics.store(view, base, 0);
+        return -110;
+    }
+
+    const retval = view[base + 5];
+    const error = view[base + 6];
+    Atomics.store(view, base, 0);
+
+    return error ? error : retval;
+});
+
+/* Exit via SAB IPC (fire-and-forget) */
 EM_JS(void, syscall_pvproc_exit, (int pid, int status), {
-    if (!Module.pvProc) return;
-    try {
-        Module.pvProc.exit(pid, status);
-        console.log('[PVPROC-SYSCALL] exit pid=' + pid + ' status=' + status);
-    } catch (e) {
-        console.error('[PVPROC-SYSCALL] exit error:', e);
-    }
+    if (!Module._pvprocSAB || !Module._pvprocView) return;
+
+    const view = Module._pvprocView;
+    const SLOT_SIZE = 128;
+    const slot = 0;
+    const base = slot * SLOT_SIZE;
+
+    view[base + 1] = 3;  /* OP_EXIT */
+    view[base + 2] = pid;
+    view[base + 3] = status;
+
+    Atomics.store(view, base, 1);
+    Atomics.notify(view, base, 1);
+
+    /* Brief wait then reset (don't block on exit) */
+    Atomics.wait(view, base, 1, 50);
+    Atomics.store(view, base, 0);
 });
 
-/* Wait - wait for child process */
+/* Wait via SAB IPC */
 EM_JS(int, syscall_pvproc_wait, (int pid, int options), {
-    if (!Module.pvProc) return -1;
-    try {
-        const result = Module.pvProc.wait(pid);
-        console.log('[PVPROC-SYSCALL] wait pid=' + pid + ' result=' + JSON.stringify(result));
-        return result ? result.exitCode : -1;
-    } catch (e) {
-        console.error('[PVPROC-SYSCALL] wait error:', e);
-        return -1;
+    if (!Module._pvprocSAB || !Module._pvprocView) return -1;
+
+    const view = Module._pvprocView;
+    const SLOT_SIZE = 128;
+    const slot = 0;
+    const base = slot * SLOT_SIZE;
+
+    view[base + 1] = 4;  /* OP_WAIT */
+    view[base + 2] = 0;  /* parent_pid */
+    view[base + 3] = pid;  /* wait_pid */
+    view[base + 4] = options;
+
+    Atomics.store(view, base, 1);
+    Atomics.notify(view, base, 1);
+
+    const result = Atomics.wait(view, base, 1, 5000);
+    if (result === 'timed-out') {
+        Atomics.store(view, base, 0);
+        return -110;
     }
+
+    const childPid = view[base + 5];
+    const error = view[base + 6];
+    Atomics.store(view, base, 0);
+
+    return error ? error : childPid;
 });
 
 /* Debug logging for process syscalls */
