@@ -280,7 +280,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char path[512];
             read_guest_string(env, arg1, path, sizeof(path));
 
-            /* Only intercept /mnt/pvfs/* paths */
+            /* Only intercept /mnt/pvfs paths */
             if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
                 return 0;  /* Let kernel handle it */
             }
@@ -379,7 +379,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char path[512];
             read_guest_string(env, arg1, path, sizeof(path));
 
-            /* Only intercept /mnt/pvfs/* paths */
+            /* Only intercept /mnt/pvfs paths */
             if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
                 return 0;
             }
@@ -439,7 +439,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 return 0;  /* Relative to non-cwd fd, let kernel handle */
             }
 
-            /* Only intercept /mnt/pvfs/* paths */
+            /* Only intercept /mnt/pvfs paths */
             if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
                 return 0;
             }
