@@ -189,73 +189,73 @@ static int read_guest_string(CPUX86State *env, uint64_t guest_addr, char *buf, i
 #define SYS_wait4       61
 #define SYS_exit_group  231
 
-/* Check if PVPROC is available */
-EM_JS(int, pvproc_available, (void), {
+/* Check if PVPROC is available (syscall interception version) */
+EM_JS(int, syscall_pvproc_available, (void), {
     return (typeof Module !== 'undefined' &&
             Module.pvProc &&
             typeof Module.pvProc.fork === 'function') ? 1 : 0;
 });
 
 /* Fork/clone - returns child PID to parent, 0 to child */
-EM_JS(int, pvproc_fork, (int flags), {
+EM_JS(int, syscall_pvproc_fork, (int flags), {
     if (!Module.pvProc) return -1;
     try {
         const result = Module.pvProc.fork(0, flags);
-        console.log('[PVPROC] fork flags=' + flags + ' result=' + JSON.stringify(result));
+        console.log('[PVPROC-SYSCALL] fork flags=' + flags + ' result=' + JSON.stringify(result));
         return result.childPid || -1;
     } catch (e) {
-        console.error('[PVPROC] fork error:', e);
+        console.error('[PVPROC-SYSCALL] fork error:', e);
         return -1;
     }
 });
 
 /* Execve - load and execute program */
-EM_JS(int, pvproc_execve, (const char *path, uint64_t argv, uint64_t envp), {
+EM_JS(int, syscall_pvproc_execve, (const char *path, uint64_t argv, uint64_t envp), {
     if (!Module.pvProc) return -1;
     try {
         const pathStr = UTF8ToString(path);
-        console.log('[PVPROC] execve path=' + pathStr);
+        console.log('[PVPROC-SYSCALL] execve path=' + pathStr);
 
         /* For now, just log - full implementation would load ELF */
         const result = Module.pvProc.exec(pathStr, 0);
         if (result && result.entryPoint) {
-            console.log('[PVPROC] execve loaded: entry=0x' + result.entryPoint.toString(16));
+            console.log('[PVPROC-SYSCALL] execve loaded: entry=0x' + result.entryPoint.toString(16));
             return 0;
         }
         return -1;
     } catch (e) {
-        console.error('[PVPROC] execve error:', e);
+        console.error('[PVPROC-SYSCALL] execve error:', e);
         return -1;
     }
 });
 
 /* Exit - notify process exit */
-EM_JS(void, pvproc_exit, (int pid, int status), {
+EM_JS(void, syscall_pvproc_exit, (int pid, int status), {
     if (!Module.pvProc) return;
     try {
         Module.pvProc.exit(pid, status);
-        console.log('[PVPROC] exit pid=' + pid + ' status=' + status);
+        console.log('[PVPROC-SYSCALL] exit pid=' + pid + ' status=' + status);
     } catch (e) {
-        console.error('[PVPROC] exit error:', e);
+        console.error('[PVPROC-SYSCALL] exit error:', e);
     }
 });
 
 /* Wait - wait for child process */
-EM_JS(int, pvproc_wait, (int pid, int options), {
+EM_JS(int, syscall_pvproc_wait, (int pid, int options), {
     if (!Module.pvProc) return -1;
     try {
         const result = Module.pvProc.wait(pid);
-        console.log('[PVPROC] wait pid=' + pid + ' result=' + JSON.stringify(result));
+        console.log('[PVPROC-SYSCALL] wait pid=' + pid + ' result=' + JSON.stringify(result));
         return result ? result.exitCode : -1;
     } catch (e) {
-        console.error('[PVPROC] wait error:', e);
+        console.error('[PVPROC-SYSCALL] wait error:', e);
         return -1;
     }
 });
 
 /* Debug logging for process syscalls */
-EM_JS(void, pvproc_log, (const char *msg), {
-    console.log('[PVPROC] ' + UTF8ToString(msg));
+EM_JS(void, syscall_pvproc_log, (const char *msg), {
+    console.log('[PVPROC-SYSCALL] ' + UTF8ToString(msg));
 });
 
 /*
@@ -332,9 +332,9 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
     /* Check if PVPROC is available */
     static int pvproc_ok = -1;
     if (pvproc_ok < 0) {
-        pvproc_ok = pvproc_available();
+        pvproc_ok = syscall_pvproc_available();
         if (pvproc_ok) {
-            pvproc_log("PVPROC syscall interception enabled");
+            syscall_pvproc_log("PVPROC syscall interception enabled");
         }
     }
 
@@ -347,19 +347,19 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
             char msg[128];
             snprintf(msg, sizeof(msg), "fork/clone: nr=%d flags=0x%lx",
                      (int)syscall_nr, (unsigned long)arg1);
-            pvproc_log(msg);
+            syscall_pvproc_log(msg);
 
             if (pvproc_ok) {
                 /* Try to handle via PVPROC */
                 int flags = (syscall_nr == SYS_clone) ? (int)arg1 : 0;
-                int child_pid = pvproc_fork(flags);
+                int child_pid = syscall_pvproc_fork(flags);
 
                 if (child_pid > 0) {
                     /* Success - allocate simulated process */
                     int sim_pid = pvproc_alloc_simulated(0);  /* TODO: get real parent PID */
                     if (sim_pid > 0) {
                         snprintf(msg, sizeof(msg), "fork simulated: child_pid=%d", sim_pid);
-                        pvproc_log(msg);
+                        syscall_pvproc_log(msg);
 
                         /* Return child PID to parent */
                         env->regs[R_EAX] = sim_pid;
@@ -379,14 +379,14 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
 
             char msg[320];
             snprintf(msg, sizeof(msg), "execve: path=%s", path);
-            pvproc_log(msg);
+            syscall_pvproc_log(msg);
 
             if (pvproc_ok) {
                 /* Try to handle via PVPROC */
-                int ret = pvproc_execve(path, arg2, arg3);
+                int ret = syscall_pvproc_execve(path, arg2, arg3);
                 if (ret == 0) {
                     snprintf(msg, sizeof(msg), "execve handled by PVPROC");
-                    pvproc_log(msg);
+                    syscall_pvproc_log(msg);
                     /* Note: Full implementation would set up new process state */
                 }
             }
@@ -400,10 +400,10 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
             int status = (int)arg1;
             char msg[128];
             snprintf(msg, sizeof(msg), "exit: status=%d", status);
-            pvproc_log(msg);
+            syscall_pvproc_log(msg);
 
             if (pvproc_ok) {
-                pvproc_exit(0, status);  /* TODO: get real PID */
+                syscall_pvproc_exit(0, status);  /* TODO: get real PID */
             }
             /* Always let kernel handle exit */
             return 0;
@@ -415,7 +415,7 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
             int options = (int)arg3;
             char msg[128];
             snprintf(msg, sizeof(msg), "wait4: pid=%d options=0x%x", wait_pid, options);
-            pvproc_log(msg);
+            syscall_pvproc_log(msg);
 
             if (pvproc_ok && wait_pid > 0) {
                 /* Check if this is one of our simulated processes */
@@ -435,7 +435,7 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
 
                     snprintf(msg, sizeof(msg), "wait4 handled: pid=%d exit_code=%d",
                              wait_pid, exit_code);
-                    pvproc_log(msg);
+                    syscall_pvproc_log(msg);
                     return 1;  /* Handled */
                 }
             }
