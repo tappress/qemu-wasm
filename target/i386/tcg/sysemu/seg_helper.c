@@ -26,6 +26,445 @@
 #include "tcg/helper-tcg.h"
 #include "../seg_helper.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+/*
+ * SABFS Syscall Interception
+ *
+ * This intercepts Linux syscalls at the TCG level and handles file I/O
+ * directly via SABFS (SharedArrayBuffer Filesystem), completely bypassing
+ * the guest kernel. This eliminates ~150ms of TCG emulation per syscall.
+ *
+ * Intercepted syscalls (x86-64 numbers):
+ *   0 = read(fd, buf, count)
+ *   1 = write(fd, buf, count)
+ *   2 = open(path, flags, mode)
+ *   3 = close(fd)
+ *
+ * File descriptors >= SABFS_FD_BASE are SABFS-managed and never reach kernel.
+ */
+
+#define SABFS_FD_BASE 10000  /* SABFS fds start here to avoid kernel conflicts */
+
+/* x86-64 syscall numbers */
+#define SYS_read    0
+#define SYS_write   1
+#define SYS_open    2
+#define SYS_close   3
+#define SYS_stat    4
+#define SYS_fstat   5
+#define SYS_openat  257
+#define AT_FDCWD    -100
+
+/* Check if SABFS is available */
+EM_JS(int, sabfs_available, (void), {
+    return (typeof SABFS !== 'undefined' && typeof SABFS.open === 'function') ? 1 : 0;
+});
+
+/* Open file in SABFS, returns SABFS fd or -1 */
+EM_JS(int, sabfs_open, (const char *path, int flags), {
+    try {
+        const pathStr = UTF8ToString(path);
+        return SABFS.open(pathStr, flags, 0o644);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Close SABFS fd */
+EM_JS(int, sabfs_close, (int fd), {
+    try {
+        return SABFS.close(fd);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Read from SABFS fd into buffer */
+EM_JS(int, sabfs_read, (int fd, void *buf, int count), {
+    try {
+        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
+        /* Use internal position tracking */
+        const result = SABFS.read(fd, buffer, count);
+        return result;
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Write to SABFS fd from buffer */
+EM_JS(int, sabfs_write, (int fd, const void *buf, int count), {
+    try {
+        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
+        return SABFS.write(fd, buffer, count);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Stat file - returns size, mode, etc. */
+EM_JS(int, sabfs_stat, (const char *path, void *statbuf), {
+    try {
+        const pathStr = UTF8ToString(path);
+        const st = SABFS.stat(pathStr);
+        if (!st) return -1;
+
+        /* Fill in Linux stat64 structure (partial) */
+        const view = new DataView(HEAPU8.buffer, statbuf, 144);
+        view.setBigUint64(0, BigInt(0), true);       /* st_dev */
+        view.setBigUint64(8, BigInt(st.ino || 1), true);   /* st_ino */
+        view.setBigUint64(16, BigInt(0), true);      /* st_nlink */
+        view.setUint32(24, st.mode, true);           /* st_mode */
+        view.setUint32(28, 0, true);                 /* st_uid */
+        view.setUint32(32, 0, true);                 /* st_gid */
+        view.setUint32(36, 0, true);                 /* padding */
+        view.setBigUint64(40, BigInt(0), true);      /* st_rdev */
+        view.setBigInt64(48, BigInt(st.size), true); /* st_size */
+        view.setBigInt64(56, BigInt(4096), true);    /* st_blksize */
+        view.setBigInt64(64, BigInt(Math.ceil(st.size / 512)), true); /* st_blocks */
+        /* Timestamps at offsets 72, 88, 104 - leave as 0 for now */
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Fstat - stat by fd */
+EM_JS(int, sabfs_fstat, (int fd, void *statbuf), {
+    try {
+        const st = SABFS.fstat(fd);
+        if (!st) return -1;
+
+        const view = new DataView(HEAPU8.buffer, statbuf, 144);
+        view.setBigUint64(0, BigInt(0), true);
+        view.setBigUint64(8, BigInt(st.ino || 1), true);
+        view.setBigUint64(16, BigInt(0), true);
+        view.setUint32(24, st.mode, true);
+        view.setUint32(28, 0, true);
+        view.setUint32(32, 0, true);
+        view.setUint32(36, 0, true);
+        view.setBigUint64(40, BigInt(0), true);
+        view.setBigInt64(48, BigInt(st.size), true);
+        view.setBigInt64(56, BigInt(4096), true);
+        view.setBigInt64(64, BigInt(Math.ceil(st.size / 512)), true);
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Debug logging */
+EM_JS(void, sabfs_log, (const char *msg), {
+    console.log('[SABFS-SYSCALL] ' + UTF8ToString(msg));
+});
+
+/*
+ * SABFS FD mapping table.
+ * Maps guest fd (>= SABFS_FD_BASE) to SABFS fd.
+ * Simple array: sabfs_fd_map[guest_fd - SABFS_FD_BASE] = sabfs_fd
+ */
+#define SABFS_MAX_FDS 256
+static int sabfs_fd_map[SABFS_MAX_FDS];
+static int sabfs_fd_initialized = 0;
+static int sabfs_next_guest_fd = SABFS_FD_BASE;
+
+static void sabfs_init_fd_map(void)
+{
+    if (!sabfs_fd_initialized) {
+        for (int i = 0; i < SABFS_MAX_FDS; i++) {
+            sabfs_fd_map[i] = -1;
+        }
+        sabfs_fd_initialized = 1;
+    }
+}
+
+static int sabfs_alloc_guest_fd(int sabfs_fd)
+{
+    sabfs_init_fd_map();
+    int guest_fd = sabfs_next_guest_fd++;
+    int idx = guest_fd - SABFS_FD_BASE;
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        sabfs_fd_map[idx] = sabfs_fd;
+        return guest_fd;
+    }
+    return -1;
+}
+
+static int sabfs_get_fd(int guest_fd)
+{
+    int idx = guest_fd - SABFS_FD_BASE;
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        return sabfs_fd_map[idx];
+    }
+    return -1;
+}
+
+static void sabfs_free_guest_fd(int guest_fd)
+{
+    int idx = guest_fd - SABFS_FD_BASE;
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        sabfs_fd_map[idx] = -1;
+    }
+}
+
+/*
+ * Read a null-terminated string from guest virtual memory.
+ * Returns length or -1 on error. Max 512 bytes.
+ */
+static int read_guest_string(CPUX86State *env, uint64_t guest_addr, char *buf, int max_len)
+{
+    int i;
+    for (i = 0; i < max_len - 1; i++) {
+        uint8_t c = cpu_ldub_data(env, guest_addr + i);
+        buf[i] = c;
+        if (c == 0) break;
+    }
+    buf[i] = 0;
+    return i;
+}
+
+/*
+ * Copy data from guest virtual memory to host buffer.
+ */
+static void read_guest_buffer(CPUX86State *env, uint64_t guest_addr, void *buf, int len)
+{
+    uint8_t *p = buf;
+    for (int i = 0; i < len; i++) {
+        p[i] = cpu_ldub_data(env, guest_addr + i);
+    }
+}
+
+/*
+ * Copy data from host buffer to guest virtual memory.
+ */
+static void write_guest_buffer(CPUX86State *env, uint64_t guest_addr, const void *buf, int len)
+{
+    const uint8_t *p = buf;
+    for (int i = 0; i < len; i++) {
+        cpu_stb_data(env, guest_addr + i, p[i]);
+    }
+}
+
+/*
+ * Try to intercept a syscall and handle it via SABFS.
+ * Returns 1 if handled (caller should return to userspace).
+ * Returns 0 if not handled (caller should proceed with kernel entry).
+ *
+ * On success, sets env->regs[R_EAX] to syscall result.
+ */
+static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
+{
+    uint64_t syscall_nr = env->regs[R_EAX];
+    uint64_t arg1 = env->regs[R_EDI];
+    uint64_t arg2 = env->regs[R_ESI];
+    uint64_t arg3 = env->regs[R_EDX];
+
+    /* Only intercept in 64-bit mode */
+    if (!(env->hflags & HF_LMA_MASK)) {
+        return 0;
+    }
+
+    /* Check if SABFS is available (check every time since it may be attached later) */
+    static int sabfs_ok = 0;
+    if (!sabfs_ok) {
+        sabfs_ok = sabfs_available();
+        if (!sabfs_ok) {
+            return 0;
+        }
+    }
+
+    switch (syscall_nr) {
+    case SYS_open:
+        {
+            char path[512];
+            read_guest_string(env, arg1, path, sizeof(path));
+
+            /* Only intercept /mnt/pvfs/* paths */
+            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+                return 0;  /* Let kernel handle it */
+            }
+
+            /* Translate /mnt/pvfs/foo → /pack/foo */
+            char sabfs_path[512];
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+
+            int sabfs_fd = sabfs_open(sabfs_path, arg2);
+            if (sabfs_fd < 0) {
+                env->regs[R_EAX] = -2;  /* -ENOENT */
+            } else {
+                int guest_fd = sabfs_alloc_guest_fd(sabfs_fd);
+                env->regs[R_EAX] = guest_fd;
+            }
+
+            /* Return to userspace: set RIP to return address */
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_read:
+        {
+            int guest_fd = arg1;
+            int sabfs_fd = sabfs_get_fd(guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            int count = arg3;
+            if (count > 65536) count = 65536;  /* Limit buffer size */
+
+            /* Allocate temporary buffer for SABFS read */
+            uint8_t *tmp = g_malloc(count);
+            if (!tmp) {
+                env->regs[R_EAX] = -12;  /* -ENOMEM */
+            } else {
+                int n = sabfs_read(sabfs_fd, tmp, count);
+                if (n > 0) {
+                    write_guest_buffer(env, arg2, tmp, n);
+                }
+                env->regs[R_EAX] = n;
+                g_free(tmp);
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_write:
+        {
+            int guest_fd = arg1;
+            int sabfs_fd = sabfs_get_fd(guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            int count = arg3;
+            if (count > 65536) count = 65536;
+
+            uint8_t *tmp = g_malloc(count);
+            if (!tmp) {
+                env->regs[R_EAX] = -12;  /* -ENOMEM */
+            } else {
+                read_guest_buffer(env, arg2, tmp, count);
+                int n = sabfs_write(sabfs_fd, tmp, count);
+                env->regs[R_EAX] = n;
+                g_free(tmp);
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_close:
+        {
+            int guest_fd = arg1;
+            int sabfs_fd = sabfs_get_fd(guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            int ret = sabfs_close(sabfs_fd);
+            sabfs_free_guest_fd(guest_fd);
+            env->regs[R_EAX] = ret;
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_stat:
+        {
+            char path[512];
+            read_guest_string(env, arg1, path, sizeof(path));
+
+            /* Only intercept /mnt/pvfs/* paths */
+            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+                return 0;
+            }
+
+            char sabfs_path[512];
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+
+            /* arg2 = statbuf pointer */
+            uint8_t statbuf[144];
+            memset(statbuf, 0, sizeof(statbuf));
+            int ret = sabfs_stat(sabfs_path, statbuf);
+            if (ret == 0) {
+                write_guest_buffer(env, arg2, statbuf, sizeof(statbuf));
+                env->regs[R_EAX] = 0;
+            } else {
+                env->regs[R_EAX] = -2;  /* -ENOENT */
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_fstat:
+        {
+            int guest_fd = arg1;
+            int sabfs_fd = sabfs_get_fd(guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd */
+            }
+
+            uint8_t statbuf[144];
+            memset(statbuf, 0, sizeof(statbuf));
+            int ret = sabfs_fstat(sabfs_fd, statbuf);
+            if (ret == 0) {
+                write_guest_buffer(env, arg2, statbuf, sizeof(statbuf));
+                env->regs[R_EAX] = 0;
+            } else {
+                env->regs[R_EAX] = -9;  /* -EBADF */
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_openat:
+        {
+            /* openat(dirfd, pathname, flags, mode) */
+            /* arg1=dirfd, arg2=pathname, arg3=flags, r10=mode */
+            int dirfd = (int)arg1;
+
+            char path[512];
+            read_guest_string(env, arg2, path, sizeof(path));
+
+            /* Handle AT_FDCWD or absolute paths */
+            if (dirfd != AT_FDCWD && path[0] != '/') {
+                return 0;  /* Relative to non-cwd fd, let kernel handle */
+            }
+
+            /* Only intercept /mnt/pvfs/* paths */
+            if (strncmp(path, "/mnt/pvfs/", 10) != 0) {
+                return 0;
+            }
+
+            char sabfs_path[512];
+            snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
+
+            int sabfs_fd = sabfs_open(sabfs_path, arg3);
+            if (sabfs_fd < 0) {
+                env->regs[R_EAX] = -2;  /* -ENOENT */
+            } else {
+                int guest_fd = sabfs_alloc_guest_fd(sabfs_fd);
+                env->regs[R_EAX] = guest_fd;
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+    }
+
+    return 0;  /* Not handled */
+}
+
+#endif /* __EMSCRIPTEN__ */
+
 void helper_syscall(CPUX86State *env, int next_eip_addend)
 {
     int selector;
@@ -33,6 +472,17 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
     if (!(env->efer & MSR_EFER_SCE)) {
         raise_exception_err_ra(env, EXCP06_ILLOP, 0, GETPC());
     }
+
+#ifdef __EMSCRIPTEN__
+    /*
+     * SABFS syscall interception: handle file I/O directly without
+     * entering guest kernel. This bypasses ~150ms of TCG emulation.
+     */
+    if (sabfs_try_intercept(env, next_eip_addend)) {
+        return;  /* Syscall handled, returning directly to userspace */
+    }
+#endif
+
     selector = (env->star >> 32) & 0xffff;
 #ifdef TARGET_X86_64
     if (env->hflags & HF_LMA_MASK) {
