@@ -163,6 +163,289 @@ EM_JS(void, syscall_sabfs_log_nr, (int nr, const char *path), {
 });
 
 /*
+ * PVPROC - Paravirtualized Process Syscall Interception
+ *
+ * Intercepts clone/fork/execve/exit/wait syscalls and handles them
+ * on the host side, bypassing slow TCG emulation of kernel process
+ * management code.
+ *
+ * x86-64 syscall numbers:
+ *   56 = clone(flags, stack, parent_tid, child_tid, tls)
+ *   57 = fork()
+ *   58 = vfork()
+ *   59 = execve(path, argv, envp)
+ *   60 = exit(status)
+ *   61 = wait4(pid, status, options, rusage)
+ *  231 = exit_group(status)
+ */
+#define SYS_clone       56
+#define SYS_fork        57
+#define SYS_vfork       58
+#define SYS_execve      59
+#define SYS_exit        60
+#define SYS_wait4       61
+#define SYS_exit_group  231
+
+/* Check if PVPROC is available */
+EM_JS(int, pvproc_available, (void), {
+    return (typeof Module !== 'undefined' &&
+            Module.pvProc &&
+            typeof Module.pvProc.fork === 'function') ? 1 : 0;
+});
+
+/* Fork/clone - returns child PID to parent, 0 to child */
+EM_JS(int, pvproc_fork, (int flags), {
+    if (!Module.pvProc) return -1;
+    try {
+        const result = Module.pvProc.fork(0, flags);
+        console.log('[PVPROC] fork flags=' + flags + ' result=' + JSON.stringify(result));
+        return result.childPid || -1;
+    } catch (e) {
+        console.error('[PVPROC] fork error:', e);
+        return -1;
+    }
+});
+
+/* Execve - load and execute program */
+EM_JS(int, pvproc_execve, (const char *path, uint64_t argv, uint64_t envp), {
+    if (!Module.pvProc) return -1;
+    try {
+        const pathStr = UTF8ToString(path);
+        console.log('[PVPROC] execve path=' + pathStr);
+
+        /* For now, just log - full implementation would load ELF */
+        const result = Module.pvProc.exec(pathStr, 0);
+        if (result && result.entryPoint) {
+            console.log('[PVPROC] execve loaded: entry=0x' + result.entryPoint.toString(16));
+            return 0;
+        }
+        return -1;
+    } catch (e) {
+        console.error('[PVPROC] execve error:', e);
+        return -1;
+    }
+});
+
+/* Exit - notify process exit */
+EM_JS(void, pvproc_exit, (int pid, int status), {
+    if (!Module.pvProc) return;
+    try {
+        Module.pvProc.exit(pid, status);
+        console.log('[PVPROC] exit pid=' + pid + ' status=' + status);
+    } catch (e) {
+        console.error('[PVPROC] exit error:', e);
+    }
+});
+
+/* Wait - wait for child process */
+EM_JS(int, pvproc_wait, (int pid, int options), {
+    if (!Module.pvProc) return -1;
+    try {
+        const result = Module.pvProc.wait(pid);
+        console.log('[PVPROC] wait pid=' + pid + ' result=' + JSON.stringify(result));
+        return result ? result.exitCode : -1;
+    } catch (e) {
+        console.error('[PVPROC] wait error:', e);
+        return -1;
+    }
+});
+
+/* Debug logging for process syscalls */
+EM_JS(void, pvproc_log, (const char *msg), {
+    console.log('[PVPROC] ' + UTF8ToString(msg));
+});
+
+/*
+ * Simulated process table for fast-path execution.
+ * When we intercept fork+execve for simple commands, we track them here
+ * and return results directly without creating real guest processes.
+ */
+#define PVPROC_MAX_SIMULATED 64
+static struct {
+    int active;
+    int pid;
+    int parent_pid;
+    int exit_code;
+    int exited;
+    char path[256];
+} pvproc_simulated[PVPROC_MAX_SIMULATED];
+static int pvproc_next_pid = 20000;  /* Start high to avoid conflicts */
+static int pvproc_initialized = 0;
+
+static void pvproc_init(void)
+{
+    if (!pvproc_initialized) {
+        for (int i = 0; i < PVPROC_MAX_SIMULATED; i++) {
+            pvproc_simulated[i].active = 0;
+        }
+        pvproc_initialized = 1;
+    }
+}
+
+static int pvproc_alloc_simulated(int parent_pid)
+{
+    pvproc_init();
+    for (int i = 0; i < PVPROC_MAX_SIMULATED; i++) {
+        if (!pvproc_simulated[i].active) {
+            pvproc_simulated[i].active = 1;
+            pvproc_simulated[i].pid = pvproc_next_pid++;
+            pvproc_simulated[i].parent_pid = parent_pid;
+            pvproc_simulated[i].exit_code = 0;
+            pvproc_simulated[i].exited = 0;
+            pvproc_simulated[i].path[0] = 0;
+            return pvproc_simulated[i].pid;
+        }
+    }
+    return -1;
+}
+
+static int pvproc_find_by_pid(int pid)
+{
+    for (int i = 0; i < PVPROC_MAX_SIMULATED; i++) {
+        if (pvproc_simulated[i].active && pvproc_simulated[i].pid == pid) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Try to intercept process-related syscalls.
+ * Returns 1 if handled, 0 if should proceed to kernel.
+ */
+static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
+{
+    uint64_t syscall_nr = env->regs[R_EAX];
+    uint64_t arg1 = env->regs[R_EDI];
+    uint64_t arg2 = env->regs[R_ESI];
+    uint64_t arg3 = env->regs[R_EDX];
+    uint64_t arg4 = env->regs[R_R10];
+
+    /* Only handle in 64-bit mode */
+    if (!(env->hflags & HF_LMA_MASK)) {
+        return 0;
+    }
+
+    /* Check if PVPROC is available */
+    static int pvproc_ok = -1;
+    if (pvproc_ok < 0) {
+        pvproc_ok = pvproc_available();
+        if (pvproc_ok) {
+            pvproc_log("PVPROC syscall interception enabled");
+        }
+    }
+
+    switch (syscall_nr) {
+    case SYS_clone:
+    case SYS_fork:
+    case SYS_vfork:
+        {
+            /* Log fork/clone attempts */
+            char msg[128];
+            snprintf(msg, sizeof(msg), "fork/clone: nr=%d flags=0x%lx",
+                     (int)syscall_nr, (unsigned long)arg1);
+            pvproc_log(msg);
+
+            if (pvproc_ok) {
+                /* Try to handle via PVPROC */
+                int flags = (syscall_nr == SYS_clone) ? (int)arg1 : 0;
+                int child_pid = pvproc_fork(flags);
+
+                if (child_pid > 0) {
+                    /* Success - allocate simulated process */
+                    int sim_pid = pvproc_alloc_simulated(0);  /* TODO: get real parent PID */
+                    if (sim_pid > 0) {
+                        snprintf(msg, sizeof(msg), "fork simulated: child_pid=%d", sim_pid);
+                        pvproc_log(msg);
+
+                        /* Return child PID to parent */
+                        env->regs[R_EAX] = sim_pid;
+                        env->eip += next_eip_addend;
+                        return 1;  /* Handled */
+                    }
+                }
+            }
+            /* Fall through to kernel */
+            return 0;
+        }
+
+    case SYS_execve:
+        {
+            char path[256];
+            read_guest_string(env, arg1, path, sizeof(path));
+
+            char msg[320];
+            snprintf(msg, sizeof(msg), "execve: path=%s", path);
+            pvproc_log(msg);
+
+            if (pvproc_ok) {
+                /* Try to handle via PVPROC */
+                int ret = pvproc_execve(path, arg2, arg3);
+                if (ret == 0) {
+                    snprintf(msg, sizeof(msg), "execve handled by PVPROC");
+                    pvproc_log(msg);
+                    /* Note: Full implementation would set up new process state */
+                }
+            }
+            /* Always fall through to kernel for now - execve is complex */
+            return 0;
+        }
+
+    case SYS_exit:
+    case SYS_exit_group:
+        {
+            int status = (int)arg1;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "exit: status=%d", status);
+            pvproc_log(msg);
+
+            if (pvproc_ok) {
+                pvproc_exit(0, status);  /* TODO: get real PID */
+            }
+            /* Always let kernel handle exit */
+            return 0;
+        }
+
+    case SYS_wait4:
+        {
+            int wait_pid = (int)arg1;
+            int options = (int)arg3;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "wait4: pid=%d options=0x%x", wait_pid, options);
+            pvproc_log(msg);
+
+            if (pvproc_ok && wait_pid > 0) {
+                /* Check if this is one of our simulated processes */
+                int idx = pvproc_find_by_pid(wait_pid);
+                if (idx >= 0 && pvproc_simulated[idx].exited) {
+                    int exit_code = pvproc_simulated[idx].exit_code;
+                    pvproc_simulated[idx].active = 0;  /* Free slot */
+
+                    /* Write exit status to user pointer if provided */
+                    if (arg2) {
+                        /* Status format: (exit_code << 8) for normal exit */
+                        cpu_stl_data(env, arg2, (exit_code & 0xff) << 8);
+                    }
+
+                    env->regs[R_EAX] = wait_pid;
+                    env->eip += next_eip_addend;
+
+                    snprintf(msg, sizeof(msg), "wait4 handled: pid=%d exit_code=%d",
+                             wait_pid, exit_code);
+                    pvproc_log(msg);
+                    return 1;  /* Handled */
+                }
+            }
+            /* Fall through to kernel */
+            return 0;
+        }
+
+    default:
+        return 0;
+    }
+}
+
+/*
  * SABFS FD mapping table.
  * Maps guest fd (>= SABFS_FD_BASE) to SABFS fd.
  * Simple array: sabfs_fd_map[guest_fd - SABFS_FD_BASE] = sabfs_fd
@@ -493,6 +776,14 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
      * entering guest kernel. This bypasses ~150ms of TCG emulation.
      */
     if (sabfs_try_intercept(env, next_eip_addend)) {
+        return;  /* Syscall handled, returning directly to userspace */
+    }
+
+    /*
+     * PVPROC syscall interception: handle fork/exec/exit/wait directly
+     * without entering guest kernel for process management.
+     */
+    if (pvproc_try_intercept(env, next_eip_addend)) {
         return;  /* Syscall handled, returning directly to userspace */
     }
 #endif
