@@ -895,18 +895,18 @@ if (typeof module !== 'undefined' && module.exports) {
     globalThis.SABFS = SABFS;
 }
 
-// Worker support: listen for SAB from main thread
-if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
-    // We're in a worker - listen for SABFS buffer
-    self.addEventListener('message', function(e) {
+// Worker support: listen for SAB from main thread via BroadcastChannel
+if (typeof BroadcastChannel !== 'undefined') {
+    const sabfsChannel = new BroadcastChannel('sabfs');
+    sabfsChannel.onmessage = function(e) {
         if (e.data && e.data.type === 'SABFS_ATTACH' && e.data.buffer instanceof SharedArrayBuffer) {
             try {
                 SABFS.attach(e.data.buffer);
-                console.log('[SABFS Worker] Attached to shared buffer');
+                console.log('[SABFS] Attached to shared buffer via BroadcastChannel');
             } catch (err) {
-                console.error('[SABFS Worker] Failed to attach:', err);
+                console.error('[SABFS] Failed to attach:', err);
             }
         }
-    });
-    console.log('[SABFS Worker] Listening for SABFS_ATTACH message');
+    };
+    console.log('[SABFS] BroadcastChannel listener ready');
 }
