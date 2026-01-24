@@ -356,6 +356,88 @@ EM_JS(int, syscall_pvproc_wait, (int pid, int options), {
     return error ? error : childPid;
 });
 
+/*
+ * Load ELF metadata from host via SAB.
+ * Returns 0 on success and fills out the elf_info struct.
+ * This allows the kernel to skip 9p file I/O during exec.
+ */
+typedef struct {
+    uint64_t entry_point;
+    uint64_t stack_ptr;
+    uint64_t brk;
+    uint32_t file_size;
+    uint32_t num_segments;
+} pvproc_elf_info_t;
+
+EM_JS(int, syscall_pvproc_load_elf, (const char *path, pvproc_elf_info_t *info), {
+    if (!Module._pvprocSAB || !Module._pvprocView) return -1;
+
+    const view = Module._pvprocView;
+    const pathStr = UTF8ToString(path);
+    const SLOT_SIZE = 128;
+    const slot = 0;
+    const base = slot * SLOT_SIZE;
+    const byteBase = slot * 512;
+
+    /* Write path string (starts at offset 32 bytes) */
+    const pathBytes = new TextEncoder().encode(pathStr);
+    const pathView = new Uint8Array(Module._pvprocSAB, byteBase + 32, 256);
+    pathView.fill(0);
+    pathView.set(pathBytes.subarray(0, Math.min(pathBytes.length, 255)));
+
+    /* Write request - OP_LOAD_ELF = 7 */
+    view[base + 1] = 7;
+
+    /* Signal request */
+    Atomics.store(view, base, 1);
+    Atomics.notify(view, base, 1);
+
+    /* Wait for response */
+    const result = Atomics.wait(view, base, 1, 5000);
+    if (result === 'timed-out') {
+        Atomics.store(view, base, 0);
+        return -110;
+    }
+
+    const retval = view[base + 5];
+    const error = view[base + 6];
+
+    if (error) {
+        Atomics.store(view, base, 0);
+        return error;
+    }
+
+    /* Read ELF info from response (offsets 304+) */
+    const dataView = new DataView(Module._pvprocSAB);
+    const entryLo = dataView.getUint32(byteBase + 304, true);
+    const entryHi = dataView.getUint32(byteBase + 308, true);
+    const stackLo = dataView.getUint32(byteBase + 312, true);
+    const stackHi = dataView.getUint32(byteBase + 316, true);
+    const brkLo = dataView.getUint32(byteBase + 320, true);
+    const brkHi = dataView.getUint32(byteBase + 324, true);
+    const fileSize = dataView.getUint32(byteBase + 328, true);
+    const numSegs = dataView.getUint32(byteBase + 332, true);
+
+    /* Write to info struct */
+    /* info is a pointer in WASM linear memory */
+    HEAPU32[info >> 2] = entryLo;
+    HEAPU32[(info >> 2) + 1] = entryHi;
+    HEAPU32[(info >> 2) + 2] = stackLo;
+    HEAPU32[(info >> 2) + 3] = stackHi;
+    HEAPU32[(info >> 2) + 4] = brkLo;
+    HEAPU32[(info >> 2) + 5] = brkHi;
+    HEAPU32[(info >> 2) + 6] = fileSize;
+    HEAPU32[(info >> 2) + 7] = numSegs;
+
+    Atomics.store(view, base, 0);
+
+    console.log('[PVPROC] Loaded ELF:', pathStr,
+                'entry=0x' + (entryHi * 0x100000000 + entryLo).toString(16),
+                'size=' + fileSize);
+
+    return 0;
+});
+
 /* Debug logging for process syscalls */
 EM_JS(void, syscall_pvproc_log, (const char *msg), {
     console.log('[PVPROC-SYSCALL] ' + UTF8ToString(msg));
@@ -476,6 +558,26 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
             snprintf(msg, sizeof(msg), "execve: path=%s", path);
             syscall_pvproc_log(msg);
 
+            /*
+             * Fast path for trivial commands.
+             * /bin/true and /bin/false just exit with 0 or 1.
+             * Instead of loading the binary, convert to exit syscall.
+             */
+            if (strcmp(path, "/bin/true") == 0 ||
+                strcmp(path, "/usr/bin/true") == 0) {
+                syscall_pvproc_log("FAST PATH: /bin/true -> exit(0)");
+                env->regs[R_EAX] = SYS_exit_group;
+                env->regs[R_EDI] = 0;  /* exit code 0 */
+                return 0;  /* Let modified syscall proceed */
+            }
+            if (strcmp(path, "/bin/false") == 0 ||
+                strcmp(path, "/usr/bin/false") == 0) {
+                syscall_pvproc_log("FAST PATH: /bin/false -> exit(1)");
+                env->regs[R_EAX] = SYS_exit_group;
+                env->regs[R_EDI] = 1;  /* exit code 1 */
+                return 0;  /* Let modified syscall proceed */
+            }
+
             if (pvproc_ok) {
                 /* Try to handle via PVPROC */
                 int ret = syscall_pvproc_execve(path, arg2, arg3);
@@ -485,7 +587,7 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
                     /* Note: Full implementation would set up new process state */
                 }
             }
-            /* Always fall through to kernel for now - execve is complex */
+            /* Fall through to kernel for normal execution */
             return 0;
         }
 
