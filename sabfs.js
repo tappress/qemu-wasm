@@ -894,3 +894,19 @@ if (typeof module !== 'undefined' && module.exports) {
 } else if (typeof globalThis !== 'undefined') {
     globalThis.SABFS = SABFS;
 }
+
+// Worker support: listen for SAB from main thread
+if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
+    // We're in a worker - listen for SABFS buffer
+    self.addEventListener('message', function(e) {
+        if (e.data && e.data.type === 'SABFS_ATTACH' && e.data.buffer instanceof SharedArrayBuffer) {
+            try {
+                SABFS.attach(e.data.buffer);
+                console.log('[SABFS Worker] Attached to shared buffer');
+            } catch (err) {
+                console.error('[SABFS Worker] Failed to attach:', err);
+            }
+        }
+    });
+    console.log('[SABFS Worker] Listening for SABFS_ATTACH message');
+}
