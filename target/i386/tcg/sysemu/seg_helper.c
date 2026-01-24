@@ -201,8 +201,8 @@ EM_JS(int, syscall_pvproc_fork, (int flags), {
     if (!Module.pvProc) return -1;
     try {
         const result = Module.pvProc.fork(0, flags);
-        console.log('[PVPROC-SYSCALL] fork flags=' + flags + ' result=' + JSON.stringify(result));
-        return result.childPid || -1;
+        console.log('[PVPROC-SYSCALL] fork result=' + JSON.stringify(result));
+        return result.pid || -1;  /* JS fork() returns {pid: ...} */
     } catch (e) {
         console.error('[PVPROC-SYSCALL] fork error:', e);
         return -1;
@@ -329,12 +329,15 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
         return 0;
     }
 
-    /* Check if PVPROC is available */
+    /* Check if PVPROC is available - check each time until ready
+     * (Module.pvProc may not be initialized during early boot) */
     static int pvproc_ok = -1;
-    if (pvproc_ok < 0) {
+    static int pvproc_logged = 0;
+    if (pvproc_ok <= 0) {
         pvproc_ok = syscall_pvproc_available();
-        if (pvproc_ok) {
+        if (pvproc_ok && !pvproc_logged) {
             syscall_pvproc_log("PVPROC syscall interception enabled");
+            pvproc_logged = 1;
         }
     }
 
