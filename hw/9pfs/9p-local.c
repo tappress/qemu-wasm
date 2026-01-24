@@ -20,6 +20,9 @@
 #include "9p-local.h"
 #include "9p-xattr.h"
 #include "9p-util.h"
+#ifdef __EMSCRIPTEN__
+#include "9p-sabfs.h"
+#endif
 #include "fsdev/qemu-fsdev.h"   /* local_ops */
 #include <arpa/inet.h>
 #include <pwd.h>
@@ -494,6 +497,10 @@ static ssize_t local_readlink(FsContext *fs_ctx, V9fsPath *fs_path,
 
 static int local_close(FsContext *ctx, V9fsFidOpenState *fs)
 {
+#ifdef __EMSCRIPTEN__
+    /* Clean up SABFS mapping */
+    sabfs_fd_map_remove(fs->fd);
+#endif
     return close(fs->fd);
 }
 
@@ -512,6 +519,19 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
         return -1;
     }
     fs->fd = fd;
+
+#ifdef __EMSCRIPTEN__
+    /* Also open in SABFS for accelerated I/O */
+    if (sabfs_is_ready()) {
+        char sabfs_path[512];
+        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", fs_path->data);
+        int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
+        if (sabfs_fd >= 0) {
+            sabfs_fd_map_add(fd, sabfs_fd);
+        }
+    }
+#endif
+
     return fs->fd;
 }
 
@@ -592,6 +612,12 @@ static ssize_t local_preadv(FsContext *ctx, V9fsFidOpenState *fs,
                             const struct iovec *iov,
                             int iovcnt, off_t offset)
 {
+#ifdef __EMSCRIPTEN__
+    /* Try SABFS first - bypasses Emscripten's syscall proxy */
+    if (sabfs_fd_map_get(fs->fd) >= 0) {
+        return sabfs_preadv(fs->fd, iov, iovcnt, offset);
+    }
+#endif
 #ifdef CONFIG_PREADV
     return preadv(fs->fd, iov, iovcnt, offset);
 #else
@@ -609,6 +635,12 @@ static ssize_t local_pwritev(FsContext *ctx, V9fsFidOpenState *fs,
                              int iovcnt, off_t offset)
 {
     ssize_t ret;
+#ifdef __EMSCRIPTEN__
+    /* Try SABFS first - bypasses Emscripten's syscall proxy */
+    if (sabfs_fd_map_get(fs->fd) >= 0) {
+        return sabfs_pwritev(fs->fd, iov, iovcnt, offset);
+    }
+#endif
 #ifdef CONFIG_PREADV
     ret = pwritev(fs->fd, iov, iovcnt, offset);
 #else
