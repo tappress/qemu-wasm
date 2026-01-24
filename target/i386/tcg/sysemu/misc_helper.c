@@ -411,6 +411,232 @@ static void pv_fs_handle_request(CPUX86State *env)
     env->pv_fs_status = (req.result >= 0 || req.error == 0) ? 1 : 0;
 }
 
+/*
+ * Paravirtualized process management (PVPROC) support
+ * Allows guest to perform fork/exec/exit via MSR hypercalls,
+ * bypassing the expensive kernel-side process management.
+ *
+ * The host handles:
+ * - Process ID allocation
+ * - ELF loading and parsing
+ * - Memory mapping setup
+ * - Stack initialization
+ *
+ * The guest kernel does minimal bookkeeping.
+ */
+
+#ifdef __EMSCRIPTEN__
+/*
+ * Fork: Create a new process
+ * Returns child PID on success, -1 on error
+ */
+EM_JS(int, pvproc_fork, (uint64_t parent_pid, uint32_t flags, uint64_t *child_pid), {
+    if (typeof Module === 'undefined' || !Module.pvProc) {
+        return -1;
+    }
+    try {
+        const result = Module.pvProc.fork(parent_pid, flags);
+        if (result.pid > 0) {
+            HEAPU32[child_pid >> 2] = result.pid & 0xFFFFFFFF;
+            HEAPU32[(child_pid >> 2) + 1] = 0;
+            return 0;
+        }
+        return -1;
+    } catch (e) {
+        console.error('[PVPROC] fork error:', e);
+        return -1;
+    }
+});
+
+/*
+ * Exec: Load and execute a new program
+ * Returns entry point and stack pointer on success
+ */
+EM_JS(int, pvproc_exec, (const char *path, uint64_t pid,
+                         uint64_t *entry_point, uint64_t *stack_ptr, uint64_t *brk), {
+    if (typeof Module === 'undefined' || !Module.pvProc) {
+        return -1;
+    }
+    try {
+        const pathStr = UTF8ToString(path);
+        const result = Module.pvProc.exec(pathStr, pid);
+        if (result.success) {
+            /* Store entry point (64-bit) */
+            HEAPU32[entry_point >> 2] = result.entryPoint & 0xFFFFFFFF;
+            HEAPU32[(entry_point >> 2) + 1] = Math.floor(result.entryPoint / 0x100000000);
+            /* Store stack pointer (64-bit) */
+            HEAPU32[stack_ptr >> 2] = result.stackPtr & 0xFFFFFFFF;
+            HEAPU32[(stack_ptr >> 2) + 1] = Math.floor(result.stackPtr / 0x100000000);
+            /* Store brk (heap start) (64-bit) */
+            HEAPU32[brk >> 2] = result.brk & 0xFFFFFFFF;
+            HEAPU32[(brk >> 2) + 1] = Math.floor(result.brk / 0x100000000);
+            return 0;
+        }
+        return result.error || -1;
+    } catch (e) {
+        console.error('[PVPROC] exec error:', e);
+        return -1;
+    }
+});
+
+/*
+ * Exit: Terminate a process
+ */
+EM_JS(int, pvproc_exit, (uint64_t pid, int exit_code), {
+    if (typeof Module === 'undefined' || !Module.pvProc) {
+        return -1;
+    }
+    try {
+        Module.pvProc.exit(pid, exit_code);
+        return 0;
+    } catch (e) {
+        console.error('[PVPROC] exit error:', e);
+        return -1;
+    }
+});
+
+/*
+ * Wait: Wait for a child process
+ * Returns exit status of child
+ */
+EM_JS(int, pvproc_wait, (uint64_t parent_pid, uint64_t *child_pid, int *status), {
+    if (typeof Module === 'undefined' || !Module.pvProc) {
+        return -1;
+    }
+    try {
+        const result = Module.pvProc.wait(parent_pid);
+        if (result.pid > 0) {
+            HEAPU32[child_pid >> 2] = result.pid & 0xFFFFFFFF;
+            HEAPU32[(child_pid >> 2) + 1] = 0;
+            HEAP32[status >> 2] = result.status;
+            return 0;
+        }
+        return result.error || -1;
+    } catch (e) {
+        console.error('[PVPROC] wait error:', e);
+        return -1;
+    }
+});
+
+/*
+ * Check if PVPROC is available
+ */
+EM_JS(int, pvproc_available, (void), {
+    return (typeof Module !== 'undefined' && Module.pvProc) ? 1 : 0;
+});
+#endif /* __EMSCRIPTEN__ */
+
+/*
+ * Handle a PVPROC request from the guest.
+ * Reads the request structure from guest memory, performs the operation,
+ * and writes the result back.
+ */
+static void pv_proc_handle_request(CPUX86State *env)
+{
+    struct kvm_pv_proc_request req;
+    hwaddr req_gpa;
+
+    if (!(env->pv_proc_ctrl & KVM_MSR_ENABLED)) {
+        env->pv_proc_status = 0;
+        return;
+    }
+
+    /* Get the guest physical address of the request structure */
+    req_gpa = env->pv_proc_ctrl & ~0xFFFULL;  /* Page-aligned */
+
+    /* Read the request from guest memory */
+    cpu_physical_memory_read(req_gpa, &req, sizeof(req));
+
+    /* Initialize result */
+    req.result = -1;
+    req.error = 38;  /* ENOSYS by default */
+
+#ifdef __EMSCRIPTEN__
+    if (pvproc_available()) {
+        switch (req.op) {
+        case PVPROC_OP_FORK:
+        case PVPROC_OP_CLONE:
+            {
+                uint64_t child_pid = 0;
+                int ret = pvproc_fork(req.parent_pid, req.flags, &child_pid);
+                if (ret == 0) {
+                    req.pid = child_pid;
+                    req.result = 0;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = 12;  /* ENOMEM */
+                }
+            }
+            break;
+
+        case PVPROC_OP_EXEC:
+            {
+                uint64_t entry_point = 0, stack_ptr = 0, brk = 0;
+                int ret = pvproc_exec(req.path, req.pid, &entry_point, &stack_ptr, &brk);
+                if (ret == 0) {
+                    req.entry_point = entry_point;
+                    req.stack_ptr = stack_ptr;
+                    req.brk = brk;
+                    req.result = 0;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = (ret == -2) ? 2 : 8;  /* ENOENT or ENOEXEC */
+                }
+            }
+            break;
+
+        case PVPROC_OP_EXIT:
+            {
+                int ret = pvproc_exit(req.pid, req.exit_code);
+                req.result = (ret == 0) ? 0 : -1;
+                req.error = (ret == 0) ? 0 : 3;  /* ESRCH */
+            }
+            break;
+
+        case PVPROC_OP_WAIT:
+            {
+                uint64_t child_pid = 0;
+                int status = 0;
+                int ret = pvproc_wait(req.parent_pid, &child_pid, &status);
+                if (ret == 0) {
+                    req.pid = child_pid;
+                    req.exit_code = status;
+                    req.result = 0;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = 10;  /* ECHILD */
+                }
+            }
+            break;
+
+        case PVPROC_OP_GETPID:
+            /* Simple: just return current PID from request */
+            req.result = 0;
+            req.error = 0;
+            break;
+
+        default:
+            req.result = -1;
+            req.error = 38;  /* ENOSYS */
+            break;
+        }
+    }
+#else
+    /* Native builds: PVPROC not supported (use normal kernel path) */
+    req.result = -1;
+    req.error = 38;  /* ENOSYS */
+#endif
+
+    /* Write result back to guest memory */
+    cpu_physical_memory_write(req_gpa, &req, sizeof(req));
+
+    /* Set status: 1 = success, 0 = error */
+    env->pv_proc_status = (req.result == 0) ? 1 : 0;
+}
+
 static void pvclock_update_wall_clock(CPUX86State *env)
 {
     struct pvclock_wall_clock wc;
@@ -738,6 +964,16 @@ void helper_wrmsr(CPUX86State *env)
             pv_fs_handle_request(env);
         }
         break;
+    /* Paravirtualized process management MSRs */
+    case MSR_KVM_PV_PROC_CTRL:
+        env->pv_proc_ctrl = val;
+        break;
+    case MSR_KVM_PV_PROC_REQUEST:
+        /* Trigger a process operation */
+        if (env->pv_proc_ctrl & KVM_MSR_ENABLED) {
+            pv_proc_handle_request(env);
+        }
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
@@ -919,6 +1155,13 @@ void helper_rdmsr(CPUX86State *env)
         break;
     case MSR_KVM_PV_FS_STATUS:
         val = env->pv_fs_status;
+        break;
+    /* Paravirtualized process management MSRs */
+    case MSR_KVM_PV_PROC_CTRL:
+        val = env->pv_proc_ctrl;
+        break;
+    case MSR_KVM_PV_PROC_STATUS:
+        val = env->pv_proc_status;
         break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
