@@ -162,6 +162,9 @@ EM_JS(void, syscall_sabfs_log_nr, (int nr, const char *path), {
     console.log('[SYSCALL-INTERCEPT] syscall=' + nr + ' path=' + (path ? UTF8ToString(path) : 'null'));
 });
 
+/* Forward declaration - defined later in file */
+static int read_guest_string(CPUX86State *env, uint64_t guest_addr, char *buf, int max_len);
+
 /*
  * PVPROC - Paravirtualized Process Syscall Interception
  *
