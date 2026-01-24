@@ -456,25 +456,14 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
             syscall_pvproc_log(msg);
 
             if (pvproc_ok) {
-                /* Try to handle via PVPROC */
+                /* Notify host about fork (for tracking) but let kernel handle it.
+                 * Full interception would require simulating the entire child process
+                 * lifecycle, which breaks complex programs like runc.
+                 * TODO: Implement fast-path for specific simple commands. */
                 int flags = (syscall_nr == SYS_clone) ? (int)arg1 : 0;
-                int child_pid = syscall_pvproc_fork(flags);
-
-                if (child_pid > 0) {
-                    /* Success - allocate simulated process */
-                    int sim_pid = pvproc_alloc_simulated(0);  /* TODO: get real parent PID */
-                    if (sim_pid > 0) {
-                        snprintf(msg, sizeof(msg), "fork simulated: child_pid=%d", sim_pid);
-                        syscall_pvproc_log(msg);
-
-                        /* Return child PID to parent */
-                        env->regs[R_EAX] = sim_pid;
-                        env->eip += next_eip_addend;
-                        return 1;  /* Handled */
-                    }
-                }
+                syscall_pvproc_fork(flags);  /* Just notify, ignore result */
             }
-            /* Fall through to kernel */
+            /* Always let kernel do the real fork */
             return 0;
         }
 
