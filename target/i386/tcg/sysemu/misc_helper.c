@@ -183,12 +183,15 @@ EM_JS(int, emscripten_pvfs_close, (int fd), {
 EM_JS(int, emscripten_pvfs_stat, (const char *path, uint32_t *size_lo, uint32_t *size_hi, uint32_t *mode), {
     try {
         var pathStr = UTF8ToString(path);
+        console.log('[PVFS] stat:', pathStr);
         var stat = FS.stat(pathStr);
+        console.log('[PVFS] stat success:', pathStr, 'size:', stat.size);
         HEAPU32[size_lo >> 2] = stat.size & 0xFFFFFFFF;
         HEAPU32[size_hi >> 2] = (stat.size / 0x100000000) >>> 0;
         HEAPU32[mode >> 2] = stat.mode;
         return 0;
     } catch (e) {
+        console.log('[PVFS] stat failed:', pathStr, e.message);
         return -1;
     }
 });
