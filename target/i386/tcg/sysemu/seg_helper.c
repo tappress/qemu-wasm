@@ -57,13 +57,13 @@
 #define SYS_openat  257
 #define AT_FDCWD    -100
 
-/* Check if SABFS is available */
-EM_JS(int, sabfs_available, (void), {
+/* Check if SABFS is available - prefixed to avoid conflict with 9p-sabfs.c */
+EM_JS(int, syscall_sabfs_available, (void), {
     return (typeof SABFS !== 'undefined' && typeof SABFS.open === 'function') ? 1 : 0;
 });
 
 /* Open file in SABFS, returns SABFS fd or -1 */
-EM_JS(int, sabfs_open, (const char *path, int flags), {
+EM_JS(int, syscall_sabfs_open, (const char *path, int flags), {
     try {
         const pathStr = UTF8ToString(path);
         return SABFS.open(pathStr, flags, 0o644);
@@ -73,7 +73,7 @@ EM_JS(int, sabfs_open, (const char *path, int flags), {
 });
 
 /* Close SABFS fd */
-EM_JS(int, sabfs_close, (int fd), {
+EM_JS(int, syscall_sabfs_close, (int fd), {
     try {
         return SABFS.close(fd);
     } catch (e) {
@@ -82,10 +82,9 @@ EM_JS(int, sabfs_close, (int fd), {
 });
 
 /* Read from SABFS fd into buffer */
-EM_JS(int, sabfs_read, (int fd, void *buf, int count), {
+EM_JS(int, syscall_sabfs_read, (int fd, void *buf, int count), {
     try {
         const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
-        /* Use internal position tracking */
         const result = SABFS.read(fd, buffer, count);
         return result;
     } catch (e) {
@@ -94,7 +93,7 @@ EM_JS(int, sabfs_read, (int fd, void *buf, int count), {
 });
 
 /* Write to SABFS fd from buffer */
-EM_JS(int, sabfs_write, (int fd, const void *buf, int count), {
+EM_JS(int, syscall_sabfs_write, (int fd, const void *buf, int count), {
     try {
         const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
         return SABFS.write(fd, buffer, count);
@@ -104,7 +103,7 @@ EM_JS(int, sabfs_write, (int fd, const void *buf, int count), {
 });
 
 /* Stat file - returns size, mode, etc. */
-EM_JS(int, sabfs_stat, (const char *path, void *statbuf), {
+EM_JS(int, syscall_sabfs_stat, (const char *path, void *statbuf), {
     try {
         const pathStr = UTF8ToString(path);
         const st = SABFS.stat(pathStr);
@@ -131,7 +130,7 @@ EM_JS(int, sabfs_stat, (const char *path, void *statbuf), {
 });
 
 /* Fstat - stat by fd */
-EM_JS(int, sabfs_fstat, (int fd, void *statbuf), {
+EM_JS(int, syscall_sabfs_fstat, (int fd, void *statbuf), {
     try {
         const st = SABFS.fstat(fd);
         if (!st) return -1;
@@ -155,7 +154,7 @@ EM_JS(int, sabfs_fstat, (int fd, void *statbuf), {
 });
 
 /* Debug logging */
-EM_JS(void, sabfs_log, (const char *msg), {
+EM_JS(void, syscall_sabfs_log, (const char *msg), {
     console.log('[SABFS-SYSCALL] ' + UTF8ToString(msg));
 });
 
@@ -268,7 +267,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
     /* Check if SABFS is available (check every time since it may be attached later) */
     static int sabfs_ok = 0;
     if (!sabfs_ok) {
-        sabfs_ok = sabfs_available();
+        sabfs_ok = syscall_sabfs_available();
         if (!sabfs_ok) {
             return 0;
         }
@@ -289,7 +288,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char sabfs_path[512];
             snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
 
-            int sabfs_fd = sabfs_open(sabfs_path, arg2);
+            int sabfs_fd = syscall_sabfs_open(sabfs_path, arg2);
             if (sabfs_fd < 0) {
                 env->regs[R_EAX] = -2;  /* -ENOENT */
             } else {
@@ -319,7 +318,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             if (!tmp) {
                 env->regs[R_EAX] = -12;  /* -ENOMEM */
             } else {
-                int n = sabfs_read(sabfs_fd, tmp, count);
+                int n = syscall_sabfs_read(sabfs_fd, tmp, count);
                 if (n > 0) {
                     write_guest_buffer(env, arg2, tmp, n);
                 }
@@ -348,7 +347,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 env->regs[R_EAX] = -12;  /* -ENOMEM */
             } else {
                 read_guest_buffer(env, arg2, tmp, count);
-                int n = sabfs_write(sabfs_fd, tmp, count);
+                int n = syscall_sabfs_write(sabfs_fd, tmp, count);
                 env->regs[R_EAX] = n;
                 g_free(tmp);
             }
@@ -366,7 +365,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 return 0;  /* Not a SABFS fd, let kernel handle */
             }
 
-            int ret = sabfs_close(sabfs_fd);
+            int ret = syscall_sabfs_close(sabfs_fd);
             sabfs_free_guest_fd(guest_fd);
             env->regs[R_EAX] = ret;
 
@@ -390,7 +389,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             /* arg2 = statbuf pointer */
             uint8_t statbuf[144];
             memset(statbuf, 0, sizeof(statbuf));
-            int ret = sabfs_stat(sabfs_path, statbuf);
+            int ret = syscall_sabfs_stat(sabfs_path, statbuf);
             if (ret == 0) {
                 write_guest_buffer(env, arg2, statbuf, sizeof(statbuf));
                 env->regs[R_EAX] = 0;
@@ -413,7 +412,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
 
             uint8_t statbuf[144];
             memset(statbuf, 0, sizeof(statbuf));
-            int ret = sabfs_fstat(sabfs_fd, statbuf);
+            int ret = syscall_sabfs_fstat(sabfs_fd, statbuf);
             if (ret == 0) {
                 write_guest_buffer(env, arg2, statbuf, sizeof(statbuf));
                 env->regs[R_EAX] = 0;
@@ -447,7 +446,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             char sabfs_path[512];
             snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", path + 10);
 
-            int sabfs_fd = sabfs_open(sabfs_path, arg3);
+            int sabfs_fd = syscall_sabfs_open(sabfs_path, arg3);
             if (sabfs_fd < 0) {
                 env->regs[R_EAX] = -2;  /* -ENOENT */
             } else {
