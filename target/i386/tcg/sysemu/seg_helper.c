@@ -155,7 +155,11 @@ EM_JS(int, syscall_sabfs_fstat, (int fd, void *statbuf), {
 
 /* Debug logging */
 EM_JS(void, syscall_sabfs_log, (const char *msg), {
-    console.log('[SABFS-SYSCALL] ' + UTF8ToString(msg));
+    console.log('[SYSCALL-INTERCEPT] ' + UTF8ToString(msg));
+});
+
+EM_JS(void, syscall_sabfs_log_nr, (int nr, const char *path), {
+    console.log('[SYSCALL-INTERCEPT] syscall=' + nr + ' path=' + (path ? UTF8ToString(path) : 'null'));
 });
 
 /*
@@ -264,6 +268,16 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
         return 0;
     }
 
+    /* Log syscalls we care about (open, openat) for debugging */
+    static int debug_count = 0;
+    if ((syscall_nr == SYS_open || syscall_nr == SYS_openat) && debug_count < 20) {
+        debug_count++;
+        char path[512];
+        uint64_t path_addr = (syscall_nr == SYS_openat) ? arg2 : arg1;
+        read_guest_string(env, path_addr, path, sizeof(path));
+        syscall_sabfs_log_nr(syscall_nr, path);
+    }
+
     /* Check if SABFS is available (check every time since it may be attached later) */
     static int sabfs_ok = 0;
     if (!sabfs_ok) {
@@ -271,6 +285,7 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
         if (!sabfs_ok) {
             return 0;
         }
+        syscall_sabfs_log("SABFS available for syscall interception");
     }
 
     switch (syscall_nr) {
