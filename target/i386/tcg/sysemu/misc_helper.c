@@ -137,7 +137,7 @@ static void pvclock_update_wall_clock(CPUX86State *env);
  * Emscripten filesystem bridge functions.
  * These interface directly with the browser's MEMFS via Emscripten FS API.
  */
-EM_JS(int64_t, emscripten_pvfs_open, (const char *path, int flags), {
+EM_JS(int, emscripten_pvfs_open, (const char *path, int flags), {
     try {
         var pathStr = UTF8ToString(path);
         var fd = FS.open(pathStr, flags === 0 ? 'r' : (flags === 1 ? 'w' : 'r+'));
@@ -147,7 +147,7 @@ EM_JS(int64_t, emscripten_pvfs_open, (const char *path, int flags), {
     }
 });
 
-EM_JS(int64_t, emscripten_pvfs_read, (int fd, void *buf, size_t count), {
+EM_JS(int, emscripten_pvfs_read, (int fd, void *buf, int count), {
     try {
         var stream = FS.getStream(fd);
         if (!stream) return -1;
@@ -158,7 +158,7 @@ EM_JS(int64_t, emscripten_pvfs_read, (int fd, void *buf, size_t count), {
     }
 });
 
-EM_JS(int64_t, emscripten_pvfs_write, (int fd, const void *buf, size_t count), {
+EM_JS(int, emscripten_pvfs_write, (int fd, const void *buf, int count), {
     try {
         var stream = FS.getStream(fd);
         if (!stream) return -1;
@@ -180,12 +180,12 @@ EM_JS(int, emscripten_pvfs_close, (int fd), {
     }
 });
 
-EM_JS(int64_t, emscripten_pvfs_stat, (const char *path, uint64_t *size, uint32_t *mode), {
+EM_JS(int, emscripten_pvfs_stat, (const char *path, uint32_t *size_lo, uint32_t *size_hi, uint32_t *mode), {
     try {
         var pathStr = UTF8ToString(path);
         var stat = FS.stat(pathStr);
-        HEAPU32[size >> 2] = stat.size;
-        HEAPU32[(size >> 2) + 1] = 0;  /* High 32 bits */
+        HEAPU32[size_lo >> 2] = stat.size & 0xFFFFFFFF;
+        HEAPU32[size_hi >> 2] = (stat.size / 0x100000000) >>> 0;
         HEAPU32[mode >> 2] = stat.mode;
         return 0;
     } catch (e) {
@@ -271,12 +271,12 @@ static void pv_fs_handle_request(CPUX86State *env)
 
     case PVFS_OP_STAT:
         {
-            uint64_t size = 0;
+            uint32_t size_lo = 0, size_hi = 0;
             uint32_t mode = 0;
-            req.result = emscripten_pvfs_stat(req.path, &size, &mode);
+            req.result = emscripten_pvfs_stat(req.path, &size_lo, &size_hi, &mode);
             if (req.result == 0) {
-                req.count = size;  /* Reuse count field for size */
-                req.flags = mode;  /* Reuse flags field for mode */
+                req.count = ((uint64_t)size_hi << 32) | size_lo;
+                req.flags = mode;
                 req.error = 0;
             }
         }
