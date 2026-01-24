@@ -46,6 +46,81 @@ EM_JS(void, emscripten_serial_putchar, (int c), {
         Module['pty'].write(new Uint8Array([c]));
     }
 });
+
+/*
+ * SABFS (SharedArrayBuffer Filesystem) integration for PVFS.
+ * Bypasses Emscripten's syscall proxy by accessing SharedArrayBuffer directly.
+ * This eliminates the main-thread round-trip that adds ~1-5ms per syscall.
+ */
+
+/* Check if SABFS is available and initialized */
+EM_JS(int, pvfs_sabfs_available, (void), {
+    if (typeof SABFS === 'undefined' || typeof SABFS.stat !== 'function') {
+        return 0;
+    }
+    try {
+        const st = SABFS.stat('/pack');
+        return st && st.isDirectory ? 1 : 0;
+    } catch (e) {
+        return 0;
+    }
+});
+
+/* Open file in SABFS */
+EM_JS(int, pvfs_sabfs_open, (const char *path, int flags), {
+    try {
+        const pathStr = UTF8ToString(path);
+        return SABFS.open(pathStr, flags, 0o644);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Close file in SABFS */
+EM_JS(int, pvfs_sabfs_close, (int fd), {
+    try {
+        return SABFS.close(fd);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Read from file at offset */
+EM_JS(int, pvfs_sabfs_pread, (int fd, void *buf, int count, double offset), {
+    try {
+        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
+        return SABFS.pread(fd, buffer, count, offset);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Write to file at offset */
+EM_JS(int, pvfs_sabfs_pwrite, (int fd, const void *buf, int count, double offset), {
+    try {
+        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
+        return SABFS.pwrite(fd, buffer, count, offset);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Stat file - returns size in *size, mode in *mode, 0 on success, -1 on error */
+EM_JS(int, pvfs_sabfs_stat, (const char *path, uint32_t *mode, uint32_t *size_lo, uint32_t *size_hi), {
+    try {
+        const pathStr = UTF8ToString(path);
+        const st = SABFS.stat(pathStr);
+        if (!st) return -1;
+
+        HEAPU32[mode >> 2] = st.mode;
+        HEAPU32[size_lo >> 2] = st.size & 0xFFFFFFFF;
+        HEAPU32[size_hi >> 2] = Math.floor(st.size / 0x100000000);
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+
 #endif /* __EMSCRIPTEN__ */
 
 /*
@@ -131,10 +206,22 @@ static void pvclock_update_wall_clock(CPUX86State *env);
  */
 
 /*
- * Note: PVFS operations use standard POSIX file I/O (stat, open, read, etc.)
- * for both native and Emscripten builds. Emscripten automatically proxies
- * these syscalls to the main thread when using PROXY_TO_PTHREAD.
+ * PVFS now uses SABFS (SharedArrayBuffer Filesystem) on Emscripten builds
+ * for direct memory access, bypassing the syscall proxy entirely.
+ * Falls back to POSIX syscalls on native builds or if SABFS unavailable.
  */
+
+#ifdef __EMSCRIPTEN__
+static int use_sabfs = -1;  /* -1 = unchecked, 0 = no, 1 = yes */
+
+static int pvfs_check_sabfs(void)
+{
+    if (use_sabfs < 0) {
+        use_sabfs = pvfs_sabfs_available();
+    }
+    return use_sabfs;
+}
+#endif
 
 /*
  * Handle a PVFS request from the guest.
@@ -162,78 +249,159 @@ static void pv_fs_handle_request(CPUX86State *env)
     req.result = -1;
     req.error = 22;  /* EINVAL */
 
-    switch (req.op) {
-    case PVFS_OP_OPEN:
-        {
-            int flags = (req.flags == 0) ? O_RDONLY :
-                       (req.flags == 1) ? (O_WRONLY | O_CREAT) :
-                       (O_RDWR | O_CREAT);
-            int fd = open(req.path, flags, 0644);
-            req.result = fd;
-            req.error = (fd >= 0) ? 0 : errno;
-        }
-        break;
+#ifdef __EMSCRIPTEN__
+    /* Use SABFS for direct SharedArrayBuffer access (no syscall proxy) */
+    if (pvfs_check_sabfs()) {
+        switch (req.op) {
+        case PVFS_OP_OPEN:
+            {
+                int flags = (req.flags == 0) ? 0 /* O_RDONLY */ :
+                           (req.flags == 1) ? 0x41 /* O_WRONLY | O_CREAT */ :
+                           0x42 /* O_RDWR | O_CREAT */;
+                int fd = pvfs_sabfs_open(req.path, flags);
+                req.result = fd;
+                req.error = (fd >= 0) ? 0 : 2;  /* ENOENT */
+            }
+            break;
 
-    case PVFS_OP_READ:
-        if (req.count > 0 && req.count <= (64 * 1024)) {
-            buf = g_malloc(req.count);
-            if (buf) {
-                ssize_t n = pread(req.handle, buf, req.count, req.offset);
-                if (n >= 0) {
-                    cpu_physical_memory_write(req.buf_gpa, buf, n);
-                    req.result = n;
+        case PVFS_OP_READ:
+            if (req.count > 0 && req.count <= (64 * 1024)) {
+                buf = g_malloc(req.count);
+                if (buf) {
+                    ssize_t n = pvfs_sabfs_pread(req.handle, buf, req.count, (double)req.offset);
+                    if (n >= 0) {
+                        cpu_physical_memory_write(req.buf_gpa, buf, n);
+                        req.result = n;
+                        req.error = 0;
+                    } else {
+                        req.result = -1;
+                        req.error = 5;  /* EIO */
+                    }
+                    g_free(buf);
+                }
+            }
+            break;
+
+        case PVFS_OP_WRITE:
+            if (req.count > 0 && req.count <= (64 * 1024)) {
+                buf = g_malloc(req.count);
+                if (buf) {
+                    cpu_physical_memory_read(req.buf_gpa, buf, req.count);
+                    ssize_t n = pvfs_sabfs_pwrite(req.handle, buf, req.count, (double)req.offset);
+                    if (n >= 0) {
+                        req.result = n;
+                        req.error = 0;
+                    } else {
+                        req.result = -1;
+                        req.error = 5;  /* EIO */
+                    }
+                    g_free(buf);
+                }
+            }
+            break;
+
+        case PVFS_OP_CLOSE:
+            req.result = pvfs_sabfs_close(req.handle);
+            req.error = (req.result == 0) ? 0 : 9;  /* EBADF */
+            break;
+
+        case PVFS_OP_STAT:
+            {
+                uint32_t mode, size_lo, size_hi;
+                if (pvfs_sabfs_stat(req.path, &mode, &size_lo, &size_hi) == 0) {
+                    req.count = size_lo + ((uint64_t)size_hi << 32);
+                    req.flags = mode;
+                    req.result = 0;
+                    req.error = 0;
+                } else {
+                    req.result = -1;
+                    req.error = 2;  /* ENOENT */
+                }
+            }
+            break;
+
+        default:
+            req.result = -1;
+            req.error = 38;  /* ENOSYS */
+            break;
+        }
+    } else
+#endif
+    {
+        /* Fallback to POSIX syscalls (native or SABFS unavailable) */
+        switch (req.op) {
+        case PVFS_OP_OPEN:
+            {
+                int flags = (req.flags == 0) ? O_RDONLY :
+                           (req.flags == 1) ? (O_WRONLY | O_CREAT) :
+                           (O_RDWR | O_CREAT);
+                int fd = open(req.path, flags, 0644);
+                req.result = fd;
+                req.error = (fd >= 0) ? 0 : errno;
+            }
+            break;
+
+        case PVFS_OP_READ:
+            if (req.count > 0 && req.count <= (64 * 1024)) {
+                buf = g_malloc(req.count);
+                if (buf) {
+                    ssize_t n = pread(req.handle, buf, req.count, req.offset);
+                    if (n >= 0) {
+                        cpu_physical_memory_write(req.buf_gpa, buf, n);
+                        req.result = n;
+                        req.error = 0;
+                    } else {
+                        req.result = -1;
+                        req.error = errno;
+                    }
+                    g_free(buf);
+                }
+            }
+            break;
+
+        case PVFS_OP_WRITE:
+            if (req.count > 0 && req.count <= (64 * 1024)) {
+                buf = g_malloc(req.count);
+                if (buf) {
+                    cpu_physical_memory_read(req.buf_gpa, buf, req.count);
+                    ssize_t n = pwrite(req.handle, buf, req.count, req.offset);
+                    if (n >= 0) {
+                        req.result = n;
+                        req.error = 0;
+                    } else {
+                        req.result = -1;
+                        req.error = errno;
+                    }
+                    g_free(buf);
+                }
+            }
+            break;
+
+        case PVFS_OP_CLOSE:
+            req.result = close(req.handle);
+            req.error = (req.result == 0) ? 0 : errno;
+            break;
+
+        case PVFS_OP_STAT:
+            {
+                struct stat st;
+                if (stat(req.path, &st) == 0) {
+                    req.count = st.st_size;
+                    req.flags = st.st_mode;
+                    req.result = 0;
                     req.error = 0;
                 } else {
                     req.result = -1;
                     req.error = errno;
                 }
-                g_free(buf);
             }
+            break;
+
+        default:
+            req.result = -1;
+            req.error = 38;  /* ENOSYS */
+            break;
         }
-        break;
-
-    case PVFS_OP_WRITE:
-        if (req.count > 0 && req.count <= (64 * 1024)) {
-            buf = g_malloc(req.count);
-            if (buf) {
-                cpu_physical_memory_read(req.buf_gpa, buf, req.count);
-                ssize_t n = pwrite(req.handle, buf, req.count, req.offset);
-                if (n >= 0) {
-                    req.result = n;
-                    req.error = 0;
-                } else {
-                    req.result = -1;
-                    req.error = errno;
-                }
-                g_free(buf);
-            }
-        }
-        break;
-
-    case PVFS_OP_CLOSE:
-        req.result = close(req.handle);
-        req.error = (req.result == 0) ? 0 : errno;
-        break;
-
-    case PVFS_OP_STAT:
-        {
-            struct stat st;
-            if (stat(req.path, &st) == 0) {
-                req.count = st.st_size;
-                req.flags = st.st_mode;
-                req.result = 0;
-                req.error = 0;
-            } else {
-                req.result = -1;
-                req.error = errno;
-            }
-        }
-        break;
-
-    default:
-        req.result = -1;
-        req.error = 38;  /* ENOSYS */
-        break;
     }
 
     /* Write result back to guest memory */

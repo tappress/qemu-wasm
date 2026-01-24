@@ -1,0 +1,10 @@
+# Native build directories
+build-native/
+build/
+
+# Git objects (big, not needed for build)
+.git/
+
+# Large compiled objects from native builds
+*.o
+*.a
