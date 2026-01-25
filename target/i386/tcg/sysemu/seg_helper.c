@@ -331,6 +331,11 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             int guest_fd = arg1;
             int sabfs_fd = sabfs_get_fd(guest_fd);
 
+            /* Debug: log fd mapping */
+            char dbg[128];
+            snprintf(dbg, sizeof(dbg), "read: guest_fd=%d sabfs_fd=%d", guest_fd, sabfs_fd);
+            syscall_sabfs_log(dbg);
+
             if (sabfs_fd < 0) {
                 return 0;  /* Not a SABFS fd, let kernel handle */
             }
@@ -344,6 +349,8 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 env->regs[R_EAX] = -12;  /* -ENOMEM */
             } else {
                 int n = syscall_sabfs_read(sabfs_fd, tmp, count);
+                snprintf(dbg, sizeof(dbg), "read result: n=%d", n);
+                syscall_sabfs_log(dbg);
                 if (n > 0) {
                     write_guest_buffer(env, arg2, tmp, n);
                 }
