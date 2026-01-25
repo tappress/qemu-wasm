@@ -349,10 +349,22 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                 env->regs[R_EAX] = -12;  /* -ENOMEM */
             } else {
                 int n = syscall_sabfs_read(sabfs_fd, tmp, count);
-                snprintf(dbg, sizeof(dbg), "read result: n=%d", n);
+                snprintf(dbg, sizeof(dbg), "read result: n=%d buf=%p guest_addr=0x%lx", n, tmp, (unsigned long)arg2);
                 syscall_sabfs_log(dbg);
                 if (n > 0) {
+                    /* Log first 32 bytes in hex */
+                    int show = n > 32 ? 32 : n;
+                    char hex[128];
+                    int pos = 0;
+                    for (int i = 0; i < show && pos < 120; i++) {
+                        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", tmp[i]);
+                    }
+                    syscall_sabfs_log(hex);
                     write_guest_buffer(env, arg2, tmp, n);
+                    /* Verify write by reading back */
+                    uint8_t verify = cpu_ldub_data(env, arg2);
+                    snprintf(dbg, sizeof(dbg), "verify first byte: wrote=%02x read=%02x", tmp[0], verify);
+                    syscall_sabfs_log(dbg);
                 }
                 env->regs[R_EAX] = n;
                 g_free(tmp);
