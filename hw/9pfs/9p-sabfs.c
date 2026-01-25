@@ -903,3 +903,4 @@ int sabfs_fstat(int fd, struct stat *st)
 }
 
 #endif /* __EMSCRIPTEN__ */
+// Force rebuild Sun Jan 25 14:14:29 UTC 2026
