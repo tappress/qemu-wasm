@@ -31,7 +31,7 @@
 #include "hw/9pfs/9p-sabfs.h"
 
 /*
- * SABFS Syscall Interception
+ * SABFS Syscall Interception v2 - Full read/write/close support
  *
  * This intercepts Linux syscalls at the TCG level and handles file I/O
  * directly via SABFS (SharedArrayBuffer Filesystem), completely bypassing
