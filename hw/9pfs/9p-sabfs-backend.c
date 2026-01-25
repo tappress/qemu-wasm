@@ -26,7 +26,8 @@ EM_JS(int, sabfs_be_js_stat, (const char *path,
                            uint32_t *size_lo, uint32_t *size_hi,
                            uint32_t *atime, uint32_t *mtime, uint32_t *ctime,
                            uint32_t *ino, uint32_t *blocks), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     const st = SABFS.stat(pathStr);
     if (!st) return -1;
@@ -51,7 +52,8 @@ EM_JS(int, sabfs_be_js_lstat, (const char *path,
                             uint32_t *size_lo, uint32_t *size_hi,
                             uint32_t *atime, uint32_t *mtime, uint32_t *ctime,
                             uint32_t *ino, uint32_t *blocks), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     const st = SABFS.lstat ? SABFS.lstat(pathStr) : SABFS.stat(pathStr);
     if (!st) return -1;
@@ -71,18 +73,21 @@ EM_JS(int, sabfs_be_js_lstat, (const char *path,
 });
 
 EM_JS(int, sabfs_be_js_open, (const char *path, int flags, int mode), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.open(pathStr, flags, mode);
 });
 
 EM_JS(int, sabfs_be_js_close, (int fd), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     return SABFS.close(fd);
 });
 
 EM_JS(ssize_t, sabfs_be_js_pread, (int fd, void *buf, size_t count, double offset), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const buffer = new Uint8Array(count);
     const ret = SABFS.pread(fd, buffer, count, offset);
     if (ret > 0) {
@@ -92,45 +97,52 @@ EM_JS(ssize_t, sabfs_be_js_pread, (int fd, void *buf, size_t count, double offse
 });
 
 EM_JS(ssize_t, sabfs_be_js_pwrite, (int fd, const void *buf, size_t count, double offset), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
     return SABFS.pwrite(fd, buffer, count, offset);
 });
 
 EM_JS(int, sabfs_be_js_mkdir, (const char *path, int mode), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.mkdir(pathStr, mode);
 });
 
 EM_JS(int, sabfs_be_js_rmdir, (const char *path), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.rmdir(pathStr);
 });
 
 EM_JS(int, sabfs_be_js_unlink, (const char *path), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.unlink(pathStr);
 });
 
 EM_JS(int, sabfs_be_js_rename, (const char *oldpath, const char *newpath), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const oldStr = UTF8ToString(oldpath);
     const newStr = UTF8ToString(newpath);
     return SABFS.rename(oldStr, newStr);
 });
 
 EM_JS(int, sabfs_be_js_symlink, (const char *target, const char *linkpath), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const targetStr = UTF8ToString(target);
     const linkStr = UTF8ToString(linkpath);
     return SABFS.symlink(targetStr, linkStr);
 });
 
 EM_JS(int, sabfs_be_js_readlink, (const char *path, char *buf, size_t bufsiz), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     const target = SABFS.readlink(pathStr);
     if (!target) return -1;
@@ -142,39 +154,45 @@ EM_JS(int, sabfs_be_js_readlink, (const char *path, char *buf, size_t bufsiz), {
 });
 
 EM_JS(int, sabfs_be_js_link, (const char *oldpath, const char *newpath), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const oldStr = UTF8ToString(oldpath);
     const newStr = UTF8ToString(newpath);
     return SABFS.link(oldStr, newStr);
 });
 
 EM_JS(int, sabfs_be_js_chmod, (const char *path, int mode), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.chmod(pathStr, mode);
 });
 
 EM_JS(int, sabfs_be_js_chown, (const char *path, int uid, int gid), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.chown(pathStr, uid, gid);
 });
 
 EM_JS(int, sabfs_be_js_truncate, (const char *path, double length), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.truncate(pathStr, length);
 });
 
 EM_JS(int, sabfs_be_js_utimes, (const char *path, double atime, double mtime), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.utimes(pathStr, atime, mtime);
 });
 
 /* Directory reading - returns JSON array of entries */
 EM_JS(int, sabfs_be_js_readdir_count, (const char *path), {
-    if (typeof SABFS === 'undefined') return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     const pathStr = UTF8ToString(path);
     const entries = SABFS.readdir(pathStr);
     if (!entries) return -1;
@@ -199,7 +217,8 @@ EM_JS(int, sabfs_be_js_readdir_entry, (int idx, char *name, size_t name_size, ui
 
 EM_JS(int, sabfs_be_js_statfs, (uint32_t *bsize, uint32_t *blocks, uint32_t *bfree,
                              uint32_t *files, uint32_t *ffree), {
-    if (typeof SABFS === 'undefined' || !SABFS.statfs) return -1;
+    const SABFS = globalThis.SABFS;
+    if (!SABFS || !SABFS.statfs) return -1;
     const st = SABFS.statfs();
     if (!st) return -1;
 
@@ -212,7 +231,8 @@ EM_JS(int, sabfs_be_js_statfs, (uint32_t *bsize, uint32_t *blocks, uint32_t *bfr
 });
 
 EM_JS(int, sabfs_be_js_is_available, (void), {
-    return (typeof SABFS !== 'undefined' && SABFS.stat) ? 1 : 0;
+    const SABFS = globalThis.SABFS;
+    return (SABFS && SABFS.stat) ? 1 : 0;
 });
 
 /* ========== 9p Backend Implementation ========== */
