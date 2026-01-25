@@ -272,14 +272,20 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
         return 0;
     }
 
-    /* Log syscalls we care about (open, openat) for debugging */
+    /* Log syscalls we care about for debugging */
     static int debug_count = 0;
-    if ((syscall_nr == SYS_open || syscall_nr == SYS_openat) && debug_count < 20) {
+    if ((syscall_nr == SYS_open || syscall_nr == SYS_openat) && debug_count < 50) {
         debug_count++;
         char path[512];
         uint64_t path_addr = (syscall_nr == SYS_openat) ? arg2 : arg1;
         read_guest_string(env, path_addr, path, sizeof(path));
         syscall_sabfs_log_nr(syscall_nr, path);
+    }
+    /* Also log read/write/close to see what fds are being used */
+    if (syscall_nr == SYS_read || syscall_nr == SYS_write || syscall_nr == SYS_close) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "fd=%d count=%d", (int)arg1, (int)arg3);
+        syscall_sabfs_log_nr(syscall_nr, msg);
     }
 
     /* Check if SABFS is available (check every time since it may be attached later) */
