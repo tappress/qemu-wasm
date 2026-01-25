@@ -542,7 +542,11 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
      */
     if (sabfs_is_ready()) {
         char sabfs_path[512];
-        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", fs_path->data);
+        const char *rel_path = fs_path->data;
+        /* Skip leading slash to avoid /pack//path */
+        if (rel_path[0] == '/') rel_path++;
+        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", rel_path);
+        fprintf(stderr, "[9p-local] SABFS open: %s\n", sabfs_path);
         int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
         if (sabfs_fd >= 0) {
             /*
@@ -566,7 +570,9 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
     /* Also open in SABFS for accelerated I/O if file exists in both */
     if (sabfs_is_ready()) {
         char sabfs_path[512];
-        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", fs_path->data);
+        const char *rel_path2 = fs_path->data;
+        if (rel_path2[0] == '/') rel_path2++;
+        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", rel_path2);
         int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
         if (sabfs_fd >= 0) {
             sabfs_fd_map_add(fd, sabfs_fd);
