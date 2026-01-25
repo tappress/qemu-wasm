@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include "9p.h"
 #include "9p-local.h"
+#include "qapi/error.h"
 #include <emscripten.h>
 #include <errno.h>
 #include <string.h>
@@ -283,21 +284,21 @@ static ssize_t sabfs_readlink(FsContext *ctx, V9fsPath *fs_path,
 
 static int sabfs_close(FsContext *ctx, V9fsFidOpenState *fs)
 {
-    SabfsFileState *state = (SabfsFileState *)fs->opaque;
+    SabfsFileState *state = (SabfsFileState *)fs->private;
     if (state) {
         sabfs_js_close(state->fd);
         g_free(state);
-        fs->opaque = NULL;
+        fs->private = NULL;
     }
     return 0;
 }
 
 static int sabfs_closedir(FsContext *ctx, V9fsFidOpenState *fs)
 {
-    SabfsDirState *state = (SabfsDirState *)fs->opaque;
+    SabfsDirState *state = (SabfsDirState *)fs->private;
     if (state) {
         g_free(state);
-        fs->opaque = NULL;
+        fs->private = NULL;
     }
     return 0;
 }
@@ -314,7 +315,7 @@ static int sabfs_open(FsContext *ctx, V9fsPath *fs_path,
     SabfsFileState *state = g_new0(SabfsFileState, 1);
     state->fd = fd;
     strncpy(state->path, fs_path->data, sizeof(state->path) - 1);
-    fs->opaque = state;
+    fs->private = state;
 
     return 0;
 }
@@ -332,14 +333,14 @@ static int sabfs_opendir(FsContext *ctx, V9fsPath *fs_path,
     strncpy(state->path, fs_path->data, sizeof(state->path) - 1);
     state->count = count;
     state->pos = 0;
-    fs->opaque = state;
+    fs->private = state;
 
     return 0;
 }
 
 static void sabfs_rewinddir(FsContext *ctx, V9fsFidOpenState *fs)
 {
-    SabfsDirState *state = (SabfsDirState *)fs->opaque;
+    SabfsDirState *state = (SabfsDirState *)fs->private;
     if (state) {
         state->pos = 0;
         /* Refresh entries */
@@ -349,14 +350,14 @@ static void sabfs_rewinddir(FsContext *ctx, V9fsFidOpenState *fs)
 
 static off_t sabfs_telldir(FsContext *ctx, V9fsFidOpenState *fs)
 {
-    SabfsDirState *state = (SabfsDirState *)fs->opaque;
+    SabfsDirState *state = (SabfsDirState *)fs->private;
     return state ? state->pos : 0;
 }
 
 static struct dirent *sabfs_readdir(FsContext *ctx, V9fsFidOpenState *fs)
 {
     static struct dirent entry;
-    SabfsDirState *state = (SabfsDirState *)fs->opaque;
+    SabfsDirState *state = (SabfsDirState *)fs->private;
 
     if (!state || state->pos >= state->count) {
         return NULL;
@@ -377,7 +378,7 @@ static struct dirent *sabfs_readdir(FsContext *ctx, V9fsFidOpenState *fs)
 
 static void sabfs_seekdir(FsContext *ctx, V9fsFidOpenState *fs, off_t off)
 {
-    SabfsDirState *state = (SabfsDirState *)fs->opaque;
+    SabfsDirState *state = (SabfsDirState *)fs->private;
     if (state) {
         state->pos = off;
     }
@@ -386,7 +387,7 @@ static void sabfs_seekdir(FsContext *ctx, V9fsFidOpenState *fs, off_t off)
 static ssize_t sabfs_preadv(FsContext *ctx, V9fsFidOpenState *fs,
                             const struct iovec *iov, int iovcnt, off_t offset)
 {
-    SabfsFileState *state = (SabfsFileState *)fs->opaque;
+    SabfsFileState *state = (SabfsFileState *)fs->private;
     if (!state) {
         errno = EBADF;
         return -1;
@@ -411,7 +412,7 @@ static ssize_t sabfs_preadv(FsContext *ctx, V9fsFidOpenState *fs,
 static ssize_t sabfs_pwritev(FsContext *ctx, V9fsFidOpenState *fs,
                              const struct iovec *iov, int iovcnt, off_t offset)
 {
-    SabfsFileState *state = (SabfsFileState *)fs->opaque;
+    SabfsFileState *state = (SabfsFileState *)fs->private;
     if (!state) {
         errno = EBADF;
         return -1;
@@ -465,7 +466,7 @@ static int sabfs_fstat(FsContext *ctx, int fid_type,
                        V9fsFidOpenState *fs, struct stat *stbuf)
 {
     if (fid_type == P9_FID_DIR) {
-        SabfsDirState *state = (SabfsDirState *)fs->opaque;
+        SabfsDirState *state = (SabfsDirState *)fs->private;
         if (!state) {
             errno = EBADF;
             return -1;
@@ -494,7 +495,7 @@ static int sabfs_fstat(FsContext *ctx, int fid_type,
         stbuf->st_blksize = 4096;
         return 0;
     } else {
-        SabfsFileState *state = (SabfsFileState *)fs->opaque;
+        SabfsFileState *state = (SabfsFileState *)fs->private;
         if (!state) {
             errno = EBADF;
             return -1;
@@ -540,7 +541,7 @@ static int sabfs_open2(FsContext *ctx, V9fsPath *fs_path, const char *name,
     SabfsFileState *state = g_new0(SabfsFileState, 1);
     state->fd = fd;
     strncpy(state->path, path, sizeof(state->path) - 1);
-    fs->opaque = state;
+    fs->private = state;
 
     return 0;
 }
@@ -566,12 +567,9 @@ static int sabfs_truncate(FsContext *ctx, V9fsPath *fs_path, off_t size)
     return sabfs_js_truncate(fs_path->data, (double)size);
 }
 
-static int sabfs_rename(FsContext *ctx, const char *oldpath,
-                        V9fsPath *newpath, const char *name)
+static int sabfs_rename(FsContext *ctx, const char *oldpath, const char *newpath)
 {
-    char newpath_full[PATH_MAX];
-    snprintf(newpath_full, sizeof(newpath_full), "%s/%s", newpath->data, name);
-    return sabfs_js_rename(oldpath, newpath_full);
+    return sabfs_js_rename(oldpath, newpath);
 }
 
 static int sabfs_chown(FsContext *ctx, V9fsPath *fs_path, FsCred *credp)
