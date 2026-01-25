@@ -54,6 +54,9 @@
 #define SYS_close   3
 #define SYS_stat    4
 #define SYS_fstat   5
+#define SYS_dup     32
+#define SYS_dup2    33
+#define SYS_dup3    292
 #define SYS_openat  257
 #define AT_FDCWD    -100
 
@@ -215,6 +218,22 @@ static void sabfs_free_guest_fd(int guest_fd)
     }
 }
 
+/* Set a specific guest fd to map to a sabfs fd (for dup2/dup3) */
+static int sabfs_set_guest_fd(int guest_fd, int sabfs_fd)
+{
+    sabfs_init_fd_map();
+    int idx = guest_fd - SABFS_FD_BASE;
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        sabfs_fd_map[idx] = sabfs_fd;
+        /* Update next_guest_fd if needed */
+        if (guest_fd >= sabfs_next_guest_fd) {
+            sabfs_next_guest_fd = guest_fd + 1;
+        }
+        return 0;
+    }
+    return -1;
+}
+
 /*
  * Read a null-terminated string from guest virtual memory.
  * Returns length or -1 on error. Max 512 bytes.
@@ -281,10 +300,15 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
         read_guest_string(env, path_addr, path, sizeof(path));
         syscall_sabfs_log_nr(syscall_nr, path);
     }
-    /* Also log read/write/close to see what fds are being used */
+    /* Also log read/write/close/dup to see what fds are being used */
     if (syscall_nr == SYS_read || syscall_nr == SYS_write || syscall_nr == SYS_close) {
         char msg[128];
         snprintf(msg, sizeof(msg), "fd=%d count=%d", (int)arg1, (int)arg3);
+        syscall_sabfs_log_nr(syscall_nr, msg);
+    }
+    if (syscall_nr == SYS_dup || syscall_nr == SYS_dup2 || syscall_nr == SYS_dup3) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "oldfd=%d newfd=%d", (int)arg1, (int)arg2);
         syscall_sabfs_log_nr(syscall_nr, msg);
     }
 
@@ -412,6 +436,101 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             int ret = syscall_sabfs_close(sabfs_fd);
             sabfs_free_guest_fd(guest_fd);
             env->regs[R_EAX] = ret;
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_dup:
+        {
+            /* dup(oldfd) - create new fd pointing to same file */
+            int old_guest_fd = arg1;
+            int sabfs_fd = sabfs_get_fd(old_guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            /* Allocate new guest fd mapping to same SABFS fd */
+            int new_guest_fd = sabfs_alloc_guest_fd(sabfs_fd);
+            if (new_guest_fd < 0) {
+                env->regs[R_EAX] = -24;  /* -EMFILE */
+            } else {
+                env->regs[R_EAX] = new_guest_fd;
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_dup2:
+        {
+            /* dup2(oldfd, newfd) - make newfd point to same file as oldfd */
+            int old_guest_fd = arg1;
+            int new_guest_fd = arg2;
+            int sabfs_fd = sabfs_get_fd(old_guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            /* If newfd is same as oldfd, just return it */
+            if (old_guest_fd == new_guest_fd) {
+                env->regs[R_EAX] = new_guest_fd;
+                env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+                return 1;
+            }
+
+            /* If newfd is in SABFS range, close old mapping first */
+            int old_sabfs_fd = sabfs_get_fd(new_guest_fd);
+            if (old_sabfs_fd >= 0) {
+                syscall_sabfs_close(old_sabfs_fd);
+                sabfs_free_guest_fd(new_guest_fd);
+            }
+
+            /* Set new_guest_fd to point to sabfs_fd */
+            if (sabfs_set_guest_fd(new_guest_fd, sabfs_fd) < 0) {
+                env->regs[R_EAX] = -9;  /* -EBADF */
+            } else {
+                env->regs[R_EAX] = new_guest_fd;
+            }
+
+            env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+            return 1;
+        }
+
+    case SYS_dup3:
+        {
+            /* dup3(oldfd, newfd, flags) - like dup2 with flags */
+            int old_guest_fd = arg1;
+            int new_guest_fd = arg2;
+            /* arg3 = flags (O_CLOEXEC), we ignore for now */
+            int sabfs_fd = sabfs_get_fd(old_guest_fd);
+
+            if (sabfs_fd < 0) {
+                return 0;  /* Not a SABFS fd, let kernel handle */
+            }
+
+            /* dup3 requires oldfd != newfd */
+            if (old_guest_fd == new_guest_fd) {
+                env->regs[R_EAX] = -22;  /* -EINVAL */
+                env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
+                return 1;
+            }
+
+            /* If newfd is in SABFS range, close old mapping first */
+            int old_sabfs_fd = sabfs_get_fd(new_guest_fd);
+            if (old_sabfs_fd >= 0) {
+                syscall_sabfs_close(old_sabfs_fd);
+                sabfs_free_guest_fd(new_guest_fd);
+            }
+
+            /* Set new_guest_fd to point to sabfs_fd */
+            if (sabfs_set_guest_fd(new_guest_fd, sabfs_fd) < 0) {
+                env->regs[R_EAX] = -9;  /* -EBADF */
+            } else {
+                env->regs[R_EAX] = new_guest_fd;
+            }
 
             env->eip = env->regs[R_ECX] = env->eip + next_eip_addend;
             return 1;
