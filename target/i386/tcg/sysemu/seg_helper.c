@@ -67,8 +67,12 @@ EM_JS(int, syscall_sabfs_available, (void), {
 EM_JS(int, syscall_sabfs_open, (const char *path, int flags), {
     try {
         const pathStr = UTF8ToString(path);
-        return SABFS.open(pathStr, flags, 0o644);
+        console.log('[SYSCALL-SABFS] open:', pathStr, 'flags:', flags);
+        const fd = SABFS.open(pathStr, flags, 0o644);
+        console.log('[SYSCALL-SABFS] open result:', fd);
+        return fd;
     } catch (e) {
+        console.log('[SYSCALL-SABFS] open error:', e.message);
         return -1;
     }
 });
