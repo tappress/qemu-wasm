@@ -19,6 +19,7 @@ fs_ss.add(when: 'CONFIG_XEN_BUS', if_true: files('xen-9p-backend.c'))
 if cpu == 'wasm32'
   fs_ss.add(files('9p-util-stub.c'))
   fs_ss.add(files('9p-sabfs.c'))
+  fs_ss.add(files('9p-sabfs-backend.c'))
 endif
 system_ss.add_all(when: 'CONFIG_FSDEV_9P', if_true: fs_ss)
 

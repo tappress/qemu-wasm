@@ -100,6 +100,17 @@ static FsDriverTable FsDrivers[] = {
             NULL
         },
     },
+#ifdef __EMSCRIPTEN__
+    {
+        .name = "sabfs",
+        .ops = &sabfs_ops,
+        .opts = (const char * []) {
+            COMMON_FS_DRIVER_OPTIONS,
+            "path",
+            NULL
+        },
+    },
+#endif
 };
 
 static int validate_opt(void *opaque, const char *name, const char *value,

@@ -19,4 +19,7 @@ FsDriverEntry *get_fsdev_fsentry(char *id);
 extern FileOperations local_ops;
 extern FileOperations synth_ops;
 extern FileOperations proxy_ops;
+#ifdef __EMSCRIPTEN__
+extern FileOperations sabfs_ops;
+#endif
 #endif
