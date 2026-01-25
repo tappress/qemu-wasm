@@ -111,10 +111,147 @@ static int elf_cache_find_free(void)
 #include <fcntl.h>
 #include <unistd.h>
 
+/*
+ * SABFS JavaScript bridge functions
+ * These EM_JS functions call into the globalThis.SABFS JavaScript object
+ * to access the SharedArrayBuffer-backed filesystem.
+ */
+
+/* Check if SABFS module is loaded and available */
+EM_JS(int, sabfs_js_is_available, (void), {
+    const SABFS = globalThis.SABFS;
+    const available = (SABFS && typeof SABFS.stat === 'function') ? 1 : 0;
+    return available;
+});
+
+/* Stat file by path */
+EM_JS(int, sabfs_js_stat, (const char *path,
+                           uint32_t *mode,
+                           uint32_t *size_lo, uint32_t *size_hi,
+                           uint32_t *ino), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
+    try {
+        const pathStr = UTF8ToString(path);
+        const st = SABFS.stat(pathStr);
+        if (!st) return -1;
+
+        HEAPU32[mode >> 2] = st.mode;
+        HEAPU32[size_lo >> 2] = st.size & 0xFFFFFFFF;
+        HEAPU32[size_hi >> 2] = Math.floor(st.size / 0x100000000);
+        HEAPU32[ino >> 2] = st.ino & 0xFFFFFFFF;
+
+        return 0;
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Open file in SABFS */
+EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
+    try {
+        const pathStr = UTF8ToString(path);
+        const fd = SABFS.open(pathStr, flags, mode);
+        return fd;
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Read from file at offset (pread) */
+EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
+    try {
+        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
+        return SABFS.pread(fd, buffer, count, offset);
+    } catch (e) {
+        return -1;
+    }
+});
+
+/* Close file in SABFS */
+EM_JS(int, sabfs_js_close, (int fd), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
+    try {
+        return SABFS.close(fd);
+    } catch (e) {
+        return -1;
+    }
+});
+
 /* Log function for preload status */
 EM_JS(void, elf_cache_log, (const char *msg), {
     console.log('[ELF-Cache]', UTF8ToString(msg));
 });
+
+/*
+ * Try to preload file from SABFS directly.
+ * SABFS stores files under /pack prefix (e.g., /bin/busybox -> /pack/bin/busybox)
+ *
+ * Returns bytes read on success, -1 if SABFS not available or file not found.
+ */
+static int elf_cache_sabfs_preload(const char *path, void *buf, size_t max_size)
+{
+    char sabfs_path[512];
+    char log_msg[256];
+    int sabfs_fd;
+    ssize_t bytes_read;
+
+    /* Check if SABFS is available */
+    if (!sabfs_js_is_available()) {
+        return -1;
+    }
+
+    /* Map guest path to SABFS path: /bin/busybox -> /pack/bin/busybox */
+    snprintf(sabfs_path, sizeof(sabfs_path), "/pack%s", path);
+
+    snprintf(log_msg, sizeof(log_msg), "SABFS preload: %s -> %s", path, sabfs_path);
+    elf_cache_log(log_msg);
+
+    /* Stat via SABFS */
+    uint32_t mode, size_lo, size_hi, ino;
+    if (sabfs_js_stat(sabfs_path, &mode, &size_lo, &size_hi, &ino) < 0) {
+        snprintf(log_msg, sizeof(log_msg), "SABFS stat failed: %s", sabfs_path);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    size_t file_size = size_lo + ((uint64_t)size_hi << 32);
+    if (file_size > max_size) {
+        snprintf(log_msg, sizeof(log_msg), "File too large: %lu > %lu",
+                 (unsigned long)file_size, (unsigned long)max_size);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    /* Open via SABFS */
+    sabfs_fd = sabfs_js_open(sabfs_path, O_RDONLY, 0);
+    if (sabfs_fd < 0) {
+        snprintf(log_msg, sizeof(log_msg), "SABFS open failed: %s", sabfs_path);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    /* Read entire file from SABFS */
+    bytes_read = sabfs_js_pread(sabfs_fd, buf, file_size, 0);
+    sabfs_js_close(sabfs_fd);
+
+    if (bytes_read < 0) {
+        snprintf(log_msg, sizeof(log_msg), "SABFS read failed: %s", sabfs_path);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    snprintf(log_msg, sizeof(log_msg), "SABFS loaded %ld bytes from %s",
+             (long)bytes_read, sabfs_path);
+    elf_cache_log(log_msg);
+
+    return (int)bytes_read;
+}
 
 static int elf_cache_posix_preload(const char *path, void *buf, size_t max_size)
 {
@@ -125,6 +262,13 @@ static int elf_cache_posix_preload(const char *path, void *buf, size_t max_size)
     ssize_t total_read = 0;
     ssize_t bytes_read;
 
+    /* Try SABFS first - use original path without /mnt/wasi1 prefix */
+    int sabfs_result = elf_cache_sabfs_preload(path, buf, max_size);
+    if (sabfs_result >= 0) {
+        return sabfs_result;
+    }
+
+    /* Fall back to POSIX I/O for non-SABFS files */
     /* Map guest path to host path:
      * Guest /bin/ls -> Host /mnt/wasi1/bin/ls
      * Guest /usr/bin/env -> Host /mnt/wasi1/usr/bin/env
@@ -142,7 +286,7 @@ static int elf_cache_posix_preload(const char *path, void *buf, size_t max_size)
         host_path[sizeof(host_path) - 1] = '\0';
     }
 
-    snprintf(log_msg, sizeof(log_msg), "Preloading: %s -> %s", path, host_path);
+    snprintf(log_msg, sizeof(log_msg), "POSIX preload: %s -> %s", path, host_path);
     elf_cache_log(log_msg);
 
     /* Stat to get file size */
@@ -182,7 +326,7 @@ static int elf_cache_posix_preload(const char *path, void *buf, size_t max_size)
 
     close(fd);
 
-    snprintf(log_msg, sizeof(log_msg), "Loaded %ld bytes from %s", (long)total_read, host_path);
+    snprintf(log_msg, sizeof(log_msg), "POSIX loaded %ld bytes from %s", (long)total_read, host_path);
     elf_cache_log(log_msg);
 
     return (int)total_read;
@@ -461,14 +605,6 @@ ssize_t elf_cache_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offs
     return total_read;
 }
 
-/* Check if SABFS module is loaded and available */
-EM_JS(int, sabfs_js_is_available, (void), {
-    const SABFS = globalThis.SABFS;
-    const available = (SABFS && typeof SABFS.stat === 'function') ? 1 : 0;
-    console.log('[SABFS C] is_available:', available);
-    return available;
-});
-
 /* Check if SABFS is initialized with data */
 EM_JS(int, sabfs_js_is_ready, (void), {
     const SABFS = globalThis.SABFS;
@@ -487,46 +623,6 @@ EM_JS(int, sabfs_js_is_ready, (void), {
     }
 });
 
-/* Open file in SABFS */
-EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
-    const SABFS = globalThis.SABFS;
-    if (!SABFS) return -1;
-    try {
-        const pathStr = UTF8ToString(path);
-        console.log('[SABFS C] open:', pathStr, 'flags:', flags);
-        const fd = SABFS.open(pathStr, flags, mode);
-        console.log('[SABFS C] open result fd:', fd);
-        return fd;
-    } catch (e) {
-        console.error('[SABFS C] open failed:', pathStr, e);
-        return -1;
-    }
-});
-
-/* Close file in SABFS */
-EM_JS(int, sabfs_js_close, (int fd), {
-    const SABFS = globalThis.SABFS;
-    if (!SABFS) return -1;
-    try {
-        return SABFS.close(fd);
-    } catch (e) {
-        return -1;
-    }
-});
-
-/* Read from file at offset (pread) */
-EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset), {
-    const SABFS = globalThis.SABFS;
-    if (!SABFS) return -1;
-    try {
-        const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
-        return SABFS.pread(fd, buffer, count, offset);
-    } catch (e) {
-        console.error('[SABFS] pread failed:', e);
-        return -1;
-    }
-});
-
 /* Write to file at offset (pwrite) */
 EM_JS(ssize_t, sabfs_js_pwrite, (int fd, const void *buf, size_t count, double offset), {
     const SABFS = globalThis.SABFS;
@@ -536,30 +632,6 @@ EM_JS(ssize_t, sabfs_js_pwrite, (int fd, const void *buf, size_t count, double o
         return SABFS.pwrite(fd, buffer, count, offset);
     } catch (e) {
         console.error('[SABFS] pwrite failed:', e);
-        return -1;
-    }
-});
-
-/* Stat file by path */
-EM_JS(int, sabfs_js_stat, (const char *path,
-                           uint32_t *mode,
-                           uint32_t *size_lo, uint32_t *size_hi,
-                           uint32_t *ino), {
-    const SABFS = globalThis.SABFS;
-    if (!SABFS) return -1;
-    try {
-        const pathStr = UTF8ToString(path);
-        const st = SABFS.stat(pathStr);
-        if (!st) return -1;
-
-        HEAPU32[mode >> 2] = st.mode;
-        HEAPU32[size_lo >> 2] = st.size & 0xFFFFFFFF;
-        HEAPU32[size_hi >> 2] = Math.floor(st.size / 0x100000000);
-        HEAPU32[ino >> 2] = st.ino & 0xFFFFFFFF;
-
-        return 0;
-    } catch (e) {
-        console.error('[SABFS] stat failed:', e);
         return -1;
     }
 });
