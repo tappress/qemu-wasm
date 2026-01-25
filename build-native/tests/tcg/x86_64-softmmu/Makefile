@@ -1,0 +1,1 @@
+/home/and/Projects/qemu-wasm/tests/tcg/Makefile.target

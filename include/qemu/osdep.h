@@ -787,14 +787,13 @@ static inline int platform_does_not_support_system(const char *command)
 
 /**
  * If the load average was unobtainable, -1 is returned
- * Note: Emscripten provides its own getloadavg declaration
  */
-#if !defined(HAVE_GETLOADAVG_FUNCTION) && !defined(__EMSCRIPTEN__)
+#ifndef HAVE_GETLOADAVG_FUNCTION
 static inline int getloadavg(double loadavg[], int nelem)
 {
     return -1;
 }
-#endif /* !HAVE_GETLOADAVG_FUNCTION && !__EMSCRIPTEN__ */
+#endif /* !HAVE_GETLOADAVG_FUNCTION */
 
 #ifdef __cplusplus
 }

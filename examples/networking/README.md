@@ -1,4 +1,4 @@
-# Enable networking on QEMU Wasm
+# Enable netwokring on QEMU Wasm
 
 QEMU provides networking functionality.
 This feature is still usable on QEMU Wasm.

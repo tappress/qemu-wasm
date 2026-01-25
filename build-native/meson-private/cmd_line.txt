@@ -1,0 +1,9 @@
+[options]
+virtfs = enabled
+coroutine_backend = ucontext
+docs = disabled
+plugins = true
+
+[properties]
+native_file = ['/home/and/Projects/qemu-wasm/build-native/config-meson.cross']
+

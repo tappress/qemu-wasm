@@ -525,26 +525,6 @@ static const VMStateDescription vmstate_poll_control_msr = {
     }
 };
 
-static bool pv_fs_needed(void *opaque)
-{
-    X86CPU *cpu = opaque;
-    CPUX86State *env = &cpu->env;
-
-    return env->pv_fs_ctrl != 0;
-}
-
-static const VMStateDescription vmstate_pv_fs = {
-    .name = "cpu/pv_fs",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .needed = pv_fs_needed,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT64(env.pv_fs_ctrl, X86CPU),
-        VMSTATE_UINT64(env.pv_fs_status, X86CPU),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
 static bool fpop_ip_dp_needed(void *opaque)
 {
     X86CPU *cpu = opaque;
@@ -1726,7 +1706,6 @@ const VMStateDescription vmstate_x86_cpu = {
         &vmstate_pv_eoi_msr,
         &vmstate_steal_time_msr,
         &vmstate_poll_control_msr,
-        &vmstate_pv_fs,
         &vmstate_fpop_ip_dp,
         &vmstate_msr_tsc_adjust,
         &vmstate_msr_tscdeadline,

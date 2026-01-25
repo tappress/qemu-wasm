@@ -20,10 +20,6 @@
 #include "9p-local.h"
 #include "9p-xattr.h"
 #include "9p-util.h"
-#ifdef __EMSCRIPTEN__
-#include "9p-sabfs.h"
-#include <emscripten.h>
-#endif
 #include "fsdev/qemu-fsdev.h"   /* local_ops */
 #include <arpa/inet.h>
 #include <pwd.h>
@@ -498,19 +494,6 @@ static ssize_t local_readlink(FsContext *fs_ctx, V9fsPath *fs_path,
 
 static int local_close(FsContext *ctx, V9fsFidOpenState *fs)
 {
-#ifdef __EMSCRIPTEN__
-    /* ELF Cache: Check if this is a cached file fd */
-    if (elf_cache_is_cache_fd(fs->fd)) {
-        return elf_cache_close(fs->fd);
-    }
-    /* SABFS-only FD: just close SABFS mapping */
-    if (fs->fd >= SABFS_FD_BASE && fs->fd < ELF_CACHE_FD_BASE) {
-        sabfs_fd_map_remove(fs->fd);
-        return 0;  /* No real POSIX fd to close */
-    }
-    /* Clean up SABFS mapping for regular fds */
-    sabfs_fd_map_remove(fs->fd);
-#endif
     return close(fs->fd);
 }
 
@@ -524,65 +507,11 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
 {
     int fd;
 
-#ifdef __EMSCRIPTEN__
-    /*
-     * ELF Cache: Check if file is cached for fast execve.
-     * If cached, use the cache fd directly (no POSIX open needed for reads).
-     */
-    if (elf_cache_is_cached(fs_path->data)) {
-        int cache_fd = elf_cache_open(fs_path->data);
-        if (cache_fd >= 0) {
-            fs->fd = cache_fd;
-            return cache_fd;
-        }
-    }
-
-    /*
-     * SABFS-first: Try SABFS before POSIX for container files.
-     * This allows files created in SABFS (like /info) to be opened.
-     */
-    if (sabfs_is_ready()) {
-        char sabfs_path[512];
-        const char *rel_path = fs_path->data;
-        /* Skip leading slash to avoid /pack//path */
-        if (rel_path[0] == '/') rel_path++;
-        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", rel_path);
-        EM_ASM({
-            console.log('[9p-local] SABFS open:', UTF8ToString($0));
-        }, sabfs_path);
-        int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
-        if (sabfs_fd >= 0) {
-            /*
-             * Use SABFS FD directly - we offset it to avoid conflicts.
-             * SABFS FDs start at SABFS_FD_BASE, ELF cache at ELF_CACHE_FD_BASE.
-             */
-            fs->fd = sabfs_fd + SABFS_FD_BASE;
-            sabfs_fd_map_add(fs->fd, sabfs_fd);
-            return fs->fd;
-        }
-    }
-#endif
-
     fd = local_open_nofollow(ctx, fs_path->data, flags, 0);
     if (fd == -1) {
         return -1;
     }
     fs->fd = fd;
-
-#ifdef __EMSCRIPTEN__
-    /* Also open in SABFS for accelerated I/O if file exists in both */
-    if (sabfs_is_ready()) {
-        char sabfs_path[512];
-        const char *rel_path2 = fs_path->data;
-        if (rel_path2[0] == '/') rel_path2++;
-        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", rel_path2);
-        int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
-        if (sabfs_fd >= 0) {
-            sabfs_fd_map_add(fd, sabfs_fd);
-        }
-    }
-#endif
-
     return fs->fd;
 }
 
@@ -663,16 +592,6 @@ static ssize_t local_preadv(FsContext *ctx, V9fsFidOpenState *fs,
                             const struct iovec *iov,
                             int iovcnt, off_t offset)
 {
-#ifdef __EMSCRIPTEN__
-    /* ELF Cache: Check if this is a cached file fd */
-    if (elf_cache_is_cache_fd(fs->fd)) {
-        return elf_cache_preadv(fs->fd, iov, iovcnt, offset);
-    }
-    /* Try SABFS next - bypasses Emscripten's syscall proxy */
-    if (sabfs_fd_map_get(fs->fd) >= 0) {
-        return sabfs_preadv(fs->fd, iov, iovcnt, offset);
-    }
-#endif
 #ifdef CONFIG_PREADV
     return preadv(fs->fd, iov, iovcnt, offset);
 #else
@@ -690,12 +609,6 @@ static ssize_t local_pwritev(FsContext *ctx, V9fsFidOpenState *fs,
                              int iovcnt, off_t offset)
 {
     ssize_t ret;
-#ifdef __EMSCRIPTEN__
-    /* Try SABFS first - bypasses Emscripten's syscall proxy */
-    if (sabfs_fd_map_get(fs->fd) >= 0) {
-        return sabfs_pwritev(fs->fd, iov, iovcnt, offset);
-    }
-#endif
 #ifdef CONFIG_PREADV
     ret = pwritev(fs->fd, iov, iovcnt, offset);
 #else
@@ -863,17 +776,6 @@ static int local_fstat(FsContext *fs_ctx, int fid_type,
     } else {
         fd = fs->fd;
     }
-
-#ifdef __EMSCRIPTEN__
-    /* ELF Cache: Check if this is a cached file fd */
-    if (elf_cache_is_cache_fd(fd)) {
-        err = elf_cache_fstat(fd, stbuf);
-        if (err == 0) {
-            return 0;  /* Success, skip xattr handling */
-        }
-        /* Fall through to normal fstat on error */
-    }
-#endif
 
     err = fstat(fd, stbuf);
     if (err) {

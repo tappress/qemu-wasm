@@ -36,8 +36,6 @@
 #define KVM_FEATURE_MSI_EXT_DEST_ID	15
 #define KVM_FEATURE_HC_MAP_GPA_RANGE	16
 #define KVM_FEATURE_MIGRATION_CONTROL	17
-#define KVM_FEATURE_PV_FS		18  /* Paravirtualized filesystem I/O */
-#define KVM_FEATURE_PV_PROC		19  /* Paravirtualized process management */
 
 #define KVM_HINTS_REALTIME      0
 
@@ -60,69 +58,6 @@
 #define MSR_KVM_ASYNC_PF_INT	0x4b564d06
 #define MSR_KVM_ASYNC_PF_ACK	0x4b564d07
 #define MSR_KVM_MIGRATION_CONTROL	0x4b564d08
-#define MSR_KVM_PV_FS_CTRL		0x4b564d10  /* PV filesystem control */
-#define MSR_KVM_PV_FS_REQUEST		0x4b564d11  /* PV filesystem request trigger */
-#define MSR_KVM_PV_FS_STATUS		0x4b564d12  /* PV filesystem status */
-
-/* PV process management MSRs */
-#define MSR_KVM_PV_PROC_CTRL		0x4b564d20  /* PV process control */
-#define MSR_KVM_PV_PROC_REQUEST		0x4b564d21  /* PV process request trigger */
-#define MSR_KVM_PV_PROC_STATUS		0x4b564d22  /* PV process status */
-
-/* PVFS operation codes */
-#define PVFS_OP_READ		1
-#define PVFS_OP_WRITE		2
-#define PVFS_OP_STAT		3
-#define PVFS_OP_OPEN		4
-#define PVFS_OP_CLOSE		5
-#define PVFS_OP_READDIR		6
-
-/* PVFS request structure (guest allocates, passes GPA via MSR_KVM_PV_FS_CTRL) */
-struct kvm_pv_fs_request {
-	uint32_t op;		/* PVFS_OP_* */
-	uint32_t flags;
-	uint64_t handle;	/* File handle (from PVFS_OP_OPEN) */
-	uint64_t offset;	/* File offset */
-	uint64_t buf_gpa;	/* Guest physical address of data buffer */
-	uint64_t count;		/* Bytes to read/write, or path length */
-	int64_t  result;	/* Return value (set by host) */
-	uint32_t error;		/* errno (set by host) */
-	uint32_t pad;
-	char path[256];		/* File path for OPEN/STAT operations */
-};
-
-/* PV process operation codes */
-#define PVPROC_OP_FORK		1   /* Clone current process */
-#define PVPROC_OP_EXEC		2   /* Execute new program */
-#define PVPROC_OP_EXIT		3   /* Terminate process */
-#define PVPROC_OP_WAIT		4   /* Wait for child */
-#define PVPROC_OP_GETPID	5   /* Get process ID */
-#define PVPROC_OP_CLONE		6   /* Clone with flags */
-
-/* PV process flags */
-#define PVPROC_FLAG_VFORK	(1 << 0)  /* vfork semantics */
-#define PVPROC_FLAG_THREAD	(1 << 1)  /* Create thread, not process */
-#define PVPROC_FLAG_SHARE_MM	(1 << 2)  /* Share memory space */
-#define PVPROC_FLAG_SHARE_FS	(1 << 3)  /* Share filesystem info */
-#define PVPROC_FLAG_SHARE_FILES	(1 << 4)  /* Share file descriptors */
-
-/* PV process request structure */
-struct kvm_pv_proc_request {
-	uint32_t op;		/* PVPROC_OP_* */
-	uint32_t flags;		/* PVPROC_FLAG_* */
-	uint64_t pid;		/* Process ID (set by guest for exec/exit, by host for fork) */
-	uint64_t parent_pid;	/* Parent process ID */
-	uint64_t entry_point;	/* Entry point for exec (set by host) */
-	uint64_t stack_ptr;	/* Initial stack pointer (set by host) */
-	uint64_t argv_gpa;	/* GPA of argument vector */
-	uint64_t envp_gpa;	/* GPA of environment vector */
-	uint64_t brk;		/* Program break (heap start, set by host) */
-	int32_t  result;	/* Return value (0=success, negative=error) */
-	int32_t  error;		/* errno on failure */
-	int32_t  exit_code;	/* Exit code for PVPROC_OP_EXIT */
-	uint32_t pad;
-	char path[256];		/* Executable path for PVPROC_OP_EXEC */
-};
 
 struct kvm_steal_time {
 	uint64_t steal;
