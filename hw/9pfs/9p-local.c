@@ -502,7 +502,12 @@ static int local_close(FsContext *ctx, V9fsFidOpenState *fs)
     if (elf_cache_is_cache_fd(fs->fd)) {
         return elf_cache_close(fs->fd);
     }
-    /* Clean up SABFS mapping */
+    /* SABFS-only FD: just close SABFS mapping */
+    if (fs->fd >= SABFS_FD_BASE && fs->fd < ELF_CACHE_FD_BASE) {
+        sabfs_fd_map_remove(fs->fd);
+        return 0;  /* No real POSIX fd to close */
+    }
+    /* Clean up SABFS mapping for regular fds */
     sabfs_fd_map_remove(fs->fd);
 #endif
     return close(fs->fd);
@@ -530,6 +535,25 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
             return cache_fd;
         }
     }
+
+    /*
+     * SABFS-first: Try SABFS before POSIX for container files.
+     * This allows files created in SABFS (like /info) to be opened.
+     */
+    if (sabfs_is_ready()) {
+        char sabfs_path[512];
+        snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", fs_path->data);
+        int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
+        if (sabfs_fd >= 0) {
+            /*
+             * Use SABFS FD directly - we offset it to avoid conflicts.
+             * SABFS FDs start at SABFS_FD_BASE, ELF cache at ELF_CACHE_FD_BASE.
+             */
+            fs->fd = sabfs_fd + SABFS_FD_BASE;
+            sabfs_fd_map_add(fs->fd, sabfs_fd);
+            return fs->fd;
+        }
+    }
 #endif
 
     fd = local_open_nofollow(ctx, fs_path->data, flags, 0);
@@ -539,7 +563,7 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
     fs->fd = fd;
 
 #ifdef __EMSCRIPTEN__
-    /* Also open in SABFS for accelerated I/O */
+    /* Also open in SABFS for accelerated I/O if file exists in both */
     if (sabfs_is_ready()) {
         char sabfs_path[512];
         snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", fs_path->data);

@@ -56,6 +56,14 @@ ssize_t sabfs_preadv(int posix_fd, const struct iovec *iov, int iovcnt, off_t of
 ssize_t sabfs_pwritev(int posix_fd, const struct iovec *iov, int iovcnt, off_t offset);
 
 /*
+ * Virtual FD ranges for SABFS and ELF cache
+ * SABFS-only FDs: 20000-29999 (files only in SharedArrayBuffer)
+ * ELF Cache FDs: 30000+ (cached executables for fast execve)
+ */
+#define SABFS_FD_BASE 20000
+#define ELF_CACHE_FD_BASE 30000
+
+/*
  * ELF Cache - for fast execve optimization
  *
  * When execve is detected, call elf_cache_preload() to cache the file.

@@ -39,8 +39,7 @@ typedef struct ElfCacheEntry {
 static ElfCacheEntry elf_cache[ELF_CACHE_MAX_FILES];
 static int elf_cache_initialized = 0;
 
-/* Virtual FD for cached files: starts at 30000 to avoid conflicts */
-#define ELF_CACHE_FD_BASE 30000
+/* Virtual FD for cached files: uses ELF_CACHE_FD_BASE from header */
 #define ELF_CACHE_MAX_FDS 256
 
 typedef struct ElfCacheFd {
@@ -655,11 +654,11 @@ static int sabfs_initialized = 0;
 static int sabfs_available = 0;
 
 /*
- * FD mapping: maps POSIX fd to SABFS fd
- * This allows us to intercept I/O on files opened via SABFS
+ * FD mapping: maps virtual fd to SABFS fd
+ * Handles both regular POSIX fds (0-255) and SABFS-only fds (20000+)
  */
 #define SABFS_MAX_FDS 256
-static int sabfs_fd_map[SABFS_MAX_FDS];  /* posix_fd -> sabfs_fd, -1 = not mapped */
+static int sabfs_fd_map[SABFS_MAX_FDS];  /* index -> sabfs_fd, -1 = not mapped */
 
 static void sabfs_fd_map_init(void)
 {
@@ -668,27 +667,43 @@ static void sabfs_fd_map_init(void)
     }
 }
 
+/* Convert virtual fd to array index */
+static int sabfs_fd_to_index(int fd)
+{
+    if (fd >= SABFS_FD_BASE && fd < ELF_CACHE_FD_BASE) {
+        /* SABFS-only FD: offset to get index */
+        return fd - SABFS_FD_BASE;
+    } else if (fd >= 0 && fd < SABFS_MAX_FDS) {
+        /* Regular POSIX fd */
+        return fd;
+    }
+    return -1;
+}
+
 void sabfs_fd_map_add(int posix_fd, int sabfs_fd)
 {
-    if (posix_fd >= 0 && posix_fd < SABFS_MAX_FDS) {
-        sabfs_fd_map[posix_fd] = sabfs_fd;
+    int idx = sabfs_fd_to_index(posix_fd);
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        sabfs_fd_map[idx] = sabfs_fd;
     }
 }
 
 void sabfs_fd_map_remove(int posix_fd)
 {
-    if (posix_fd >= 0 && posix_fd < SABFS_MAX_FDS) {
-        if (sabfs_fd_map[posix_fd] >= 0) {
-            sabfs_js_close(sabfs_fd_map[posix_fd]);
+    int idx = sabfs_fd_to_index(posix_fd);
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        if (sabfs_fd_map[idx] >= 0) {
+            sabfs_js_close(sabfs_fd_map[idx]);
         }
-        sabfs_fd_map[posix_fd] = -1;
+        sabfs_fd_map[idx] = -1;
     }
 }
 
 int sabfs_fd_map_get(int posix_fd)
 {
-    if (posix_fd >= 0 && posix_fd < SABFS_MAX_FDS) {
-        return sabfs_fd_map[posix_fd];
+    int idx = sabfs_fd_to_index(posix_fd);
+    if (idx >= 0 && idx < SABFS_MAX_FDS) {
+        return sabfs_fd_map[idx];
     }
     return -1;
 }
