@@ -22,6 +22,7 @@
 #include "9p-util.h"
 #ifdef __EMSCRIPTEN__
 #include "9p-sabfs.h"
+#include <emscripten.h>
 #endif
 #include "fsdev/qemu-fsdev.h"   /* local_ops */
 #include <arpa/inet.h>
@@ -546,7 +547,9 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
         /* Skip leading slash to avoid /pack//path */
         if (rel_path[0] == '/') rel_path++;
         snprintf(sabfs_path, sizeof(sabfs_path), "/pack/%s", rel_path);
-        fprintf(stderr, "[9p-local] SABFS open: %s\n", sabfs_path);
+        EM_ASM({
+            console.log('[9p-local] SABFS open:', UTF8ToString($0));
+        }, sabfs_path);
         int sabfs_fd = sabfs_open(sabfs_path, flags, 0644);
         if (sabfs_fd >= 0) {
             /*

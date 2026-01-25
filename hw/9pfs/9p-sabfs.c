@@ -120,6 +120,7 @@ static int elf_cache_find_free(void)
 EM_JS(int, sabfs_js_is_available, (void), {
     const SABFS = globalThis.SABFS;
     const available = (SABFS && typeof SABFS.stat === 'function') ? 1 : 0;
+    console.log('[SABFS C] is_available:', available, 'SABFS:', !!SABFS);
     return available;
 });
 
