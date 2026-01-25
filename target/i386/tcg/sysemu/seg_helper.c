@@ -28,6 +28,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include "hw/9pfs/9p-sabfs.h"
 
 /*
  * SABFS Syscall Interception
@@ -619,8 +620,8 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
              * This caches the file so subsequent 9p reads are served from memory.
              * The cache is checked in local_open/local_preadv in 9p-local.c.
              */
-            int preloaded = syscall_elf_cache_preload(path);
-            if (preloaded) {
+            int preloaded = elf_cache_preload(path);
+            if (preloaded == 0) {
                 snprintf(msg, sizeof(msg), "ELF cached: %s", path);
                 syscall_pvproc_log(msg);
             }

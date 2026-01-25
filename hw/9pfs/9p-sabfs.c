@@ -118,12 +118,34 @@ EM_JS(int, elf_cache_js_preload, (const char *path, void *buf, size_t max_size),
         }
 
         /* Then try SABFS */
-        if (typeof SABFS !== 'undefined' && SABFS.readFile) {
-            const data = SABFS.readFile(pathStr);
+        if (typeof SABFS !== 'undefined' && SABFS.exportFile) {
+            const data = SABFS.exportFile(pathStr);
             if (data && data.length <= max_size) {
                 HEAPU8.set(data, buf);
                 console.log('[ELF-Cache] Loaded from SABFS:', data.length, 'bytes');
                 return data.length;
+            }
+        }
+
+        /* Fallback: try Emscripten FS (which backs 9p mount) */
+        /* This reads the file via 9p, but only once - cache serves subsequent reads */
+        if (typeof FS !== 'undefined') {
+            try {
+                /* Map 9p paths: guest /bin -> host /mnt/wasi1/bin, etc. */
+                let hostPath = pathStr;
+                if (pathStr.startsWith('/bin/') || pathStr.startsWith('/lib/') ||
+                    pathStr.startsWith('/usr/') || pathStr.startsWith('/sbin/')) {
+                    hostPath = '/mnt/wasi1' + pathStr;
+                }
+
+                const data = FS.readFile(hostPath);
+                if (data && data.length <= max_size) {
+                    HEAPU8.set(data, buf);
+                    console.log('[ELF-Cache] Loaded from FS:', data.length, 'bytes (', hostPath, ')');
+                    return data.length;
+                }
+            } catch (fsErr) {
+                console.log('[ELF-Cache] FS.readFile failed:', fsErr.message);
             }
         }
 
