@@ -55,6 +55,24 @@ int sabfs_fd_map_get(int posix_fd);
 ssize_t sabfs_preadv(int posix_fd, const struct iovec *iov, int iovcnt, off_t offset);
 ssize_t sabfs_pwritev(int posix_fd, const struct iovec *iov, int iovcnt, off_t offset);
 
+/*
+ * ELF Cache - for fast execve optimization
+ *
+ * When execve is detected, call elf_cache_preload() to cache the file.
+ * The 9p layer will then use the cache for subsequent reads.
+ */
+int elf_cache_preload(const char *path);
+int elf_cache_is_cached(const char *path);
+int elf_cache_is_cache_fd(int fd);
+int elf_cache_open(const char *path);
+ssize_t elf_cache_pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t elf_cache_read(int fd, void *buf, size_t count);
+off_t elf_cache_lseek(int fd, off_t offset, int whence);
+int elf_cache_fstat(int fd, struct stat *st);
+int elf_cache_stat(const char *path, struct stat *st);
+int elf_cache_close(int fd);
+ssize_t elf_cache_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset);
+
 #else /* !__EMSCRIPTEN__ */
 
 /* Stubs for non-Emscripten builds */

@@ -17,6 +17,397 @@
 #define SABFS_PREFIX "/pack"
 #define SABFS_PREFIX_LEN 5
 
+/*
+ * ELF Cache - Cache executable files for fast execve
+ *
+ * When execve is detected, we preload the file from SABFS/9p into
+ * a local cache. Subsequent reads during the kernel's ELF loading
+ * are served from this cache, avoiding slow 9p round-trips.
+ */
+#define ELF_CACHE_MAX_FILES 32
+#define ELF_CACHE_MAX_FILE_SIZE (16 * 1024 * 1024)  /* 16MB per file */
+
+typedef struct ElfCacheEntry {
+    char path[256];
+    uint8_t *data;
+    size_t size;
+    uint32_t mode;
+    uint32_t refcount;
+    int active;
+} ElfCacheEntry;
+
+static ElfCacheEntry elf_cache[ELF_CACHE_MAX_FILES];
+static int elf_cache_initialized = 0;
+
+/* Virtual FD for cached files: starts at 30000 to avoid conflicts */
+#define ELF_CACHE_FD_BASE 30000
+#define ELF_CACHE_MAX_FDS 256
+
+typedef struct ElfCacheFd {
+    int cache_idx;      /* Index into elf_cache */
+    off_t offset;       /* Current file offset */
+    int active;
+} ElfCacheFd;
+
+static ElfCacheFd elf_cache_fds[ELF_CACHE_MAX_FDS];
+static int elf_cache_next_fd = ELF_CACHE_FD_BASE;
+
+static void elf_cache_init(void)
+{
+    if (elf_cache_initialized) return;
+
+    for (int i = 0; i < ELF_CACHE_MAX_FILES; i++) {
+        elf_cache[i].path[0] = '\0';
+        elf_cache[i].data = NULL;
+        elf_cache[i].size = 0;
+        elf_cache[i].active = 0;
+    }
+    for (int i = 0; i < ELF_CACHE_MAX_FDS; i++) {
+        elf_cache_fds[i].active = 0;
+    }
+    elf_cache_initialized = 1;
+}
+
+/* Find cache entry by path */
+static int elf_cache_find(const char *path)
+{
+    for (int i = 0; i < ELF_CACHE_MAX_FILES; i++) {
+        if (elf_cache[i].active && strcmp(elf_cache[i].path, path) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Find free cache slot */
+static int elf_cache_find_free(void)
+{
+    for (int i = 0; i < ELF_CACHE_MAX_FILES; i++) {
+        if (!elf_cache[i].active) {
+            return i;
+        }
+    }
+    /* Evict first entry with refcount 0 */
+    for (int i = 0; i < ELF_CACHE_MAX_FILES; i++) {
+        if (elf_cache[i].refcount == 0) {
+            if (elf_cache[i].data) {
+                free(elf_cache[i].data);
+                elf_cache[i].data = NULL;
+            }
+            elf_cache[i].active = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Preload file into ELF cache - called from JavaScript */
+EM_JS(int, elf_cache_js_preload, (const char *path, void *buf, size_t max_size), {
+    const pathStr = UTF8ToString(path);
+    console.log('[ELF-Cache] Preloading:', pathStr);
+
+    try {
+        /* First try ELF_CACHE if available */
+        if (typeof ELF_CACHE !== 'undefined' && ELF_CACHE.isCached(pathStr)) {
+            const data = ELF_CACHE.getFileDataByPath(pathStr);
+            if (data && data.length <= max_size) {
+                HEAPU8.set(data, buf);
+                console.log('[ELF-Cache] Loaded from JS cache:', data.length, 'bytes');
+                return data.length;
+            }
+        }
+
+        /* Then try SABFS */
+        if (typeof SABFS !== 'undefined' && SABFS.readFile) {
+            const data = SABFS.readFile(pathStr);
+            if (data && data.length <= max_size) {
+                HEAPU8.set(data, buf);
+                console.log('[ELF-Cache] Loaded from SABFS:', data.length, 'bytes');
+                return data.length;
+            }
+        }
+
+        console.log('[ELF-Cache] File not found:', pathStr);
+        return -1;
+    } catch (e) {
+        console.error('[ELF-Cache] Preload error:', e);
+        return -1;
+    }
+});
+
+/* Public API: Preload file into cache */
+int elf_cache_preload(const char *path)
+{
+    elf_cache_init();
+
+    /* Already cached? */
+    if (elf_cache_find(path) >= 0) {
+        return 0;
+    }
+
+    /* Find free slot */
+    int idx = elf_cache_find_free();
+    if (idx < 0) {
+        fprintf(stderr, "[ELF-Cache] No free cache slots\n");
+        return -1;
+    }
+
+    /* Allocate buffer for file data */
+    uint8_t *buf = malloc(ELF_CACHE_MAX_FILE_SIZE);
+    if (!buf) {
+        fprintf(stderr, "[ELF-Cache] Failed to allocate buffer\n");
+        return -1;
+    }
+
+    /* Load file from JavaScript */
+    int size = elf_cache_js_preload(path, buf, ELF_CACHE_MAX_FILE_SIZE);
+    if (size < 0) {
+        free(buf);
+        return -1;
+    }
+
+    /* Shrink buffer to actual size */
+    uint8_t *data = realloc(buf, size);
+    if (!data) {
+        data = buf;  /* Keep original if realloc fails */
+    }
+
+    /* Store in cache */
+    strncpy(elf_cache[idx].path, path, sizeof(elf_cache[idx].path) - 1);
+    elf_cache[idx].path[sizeof(elf_cache[idx].path) - 1] = '\0';
+    elf_cache[idx].data = data;
+    elf_cache[idx].size = size;
+    elf_cache[idx].mode = 0100755;  /* Regular file, executable */
+    elf_cache[idx].refcount = 0;
+    elf_cache[idx].active = 1;
+
+    fprintf(stderr, "[ELF-Cache] Cached %s (%d bytes)\n", path, size);
+    return 0;
+}
+
+/* Check if file is in cache */
+int elf_cache_is_cached(const char *path)
+{
+    elf_cache_init();
+    return elf_cache_find(path) >= 0;
+}
+
+/* Check if fd is an ELF cache fd */
+int elf_cache_is_cache_fd(int fd)
+{
+    if (fd < ELF_CACHE_FD_BASE) return 0;
+    int idx = fd - ELF_CACHE_FD_BASE;
+    if (idx >= ELF_CACHE_MAX_FDS) return 0;
+    return elf_cache_fds[idx].active;
+}
+
+/* Open cached file */
+int elf_cache_open(const char *path)
+{
+    elf_cache_init();
+
+    int cache_idx = elf_cache_find(path);
+    if (cache_idx < 0) {
+        return -1;
+    }
+
+    /* Find free fd slot */
+    int fd_idx = elf_cache_next_fd - ELF_CACHE_FD_BASE;
+    if (fd_idx >= ELF_CACHE_MAX_FDS) {
+        /* Wrap around and find first free */
+        for (fd_idx = 0; fd_idx < ELF_CACHE_MAX_FDS; fd_idx++) {
+            if (!elf_cache_fds[fd_idx].active) break;
+        }
+        if (fd_idx >= ELF_CACHE_MAX_FDS) {
+            fprintf(stderr, "[ELF-Cache] No free fd slots\n");
+            return -1;
+        }
+    }
+
+    int fd = ELF_CACHE_FD_BASE + fd_idx;
+    elf_cache_fds[fd_idx].cache_idx = cache_idx;
+    elf_cache_fds[fd_idx].offset = 0;
+    elf_cache_fds[fd_idx].active = 1;
+    elf_cache[cache_idx].refcount++;
+
+    elf_cache_next_fd = fd + 1;
+    fprintf(stderr, "[ELF-Cache] Opened %s as fd %d\n", path, fd);
+    return fd;
+}
+
+/* Read from cached file (pread) */
+ssize_t elf_cache_pread(int fd, void *buf, size_t count, off_t offset)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    int cache_idx = elf_cache_fds[fd_idx].cache_idx;
+
+    if (!elf_cache[cache_idx].active) {
+        return -1;
+    }
+
+    size_t file_size = elf_cache[cache_idx].size;
+    if (offset >= (off_t)file_size) {
+        return 0;  /* EOF */
+    }
+
+    size_t available = file_size - offset;
+    size_t to_read = count < available ? count : available;
+
+    memcpy(buf, elf_cache[cache_idx].data + offset, to_read);
+    return to_read;
+}
+
+/* Read from cached file (sequential) */
+ssize_t elf_cache_read(int fd, void *buf, size_t count)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    ssize_t ret = elf_cache_pread(fd, buf, count, elf_cache_fds[fd_idx].offset);
+    if (ret > 0) {
+        elf_cache_fds[fd_idx].offset += ret;
+    }
+    return ret;
+}
+
+/* Seek on cached file */
+off_t elf_cache_lseek(int fd, off_t offset, int whence)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    int cache_idx = elf_cache_fds[fd_idx].cache_idx;
+    size_t file_size = elf_cache[cache_idx].size;
+    off_t new_offset;
+
+    switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            new_offset = elf_cache_fds[fd_idx].offset + offset;
+            break;
+        case SEEK_END:
+            new_offset = file_size + offset;
+            break;
+        default:
+            return -1;
+    }
+
+    if (new_offset < 0) {
+        return -1;
+    }
+
+    elf_cache_fds[fd_idx].offset = new_offset;
+    return new_offset;
+}
+
+/* Get file stat from cache */
+int elf_cache_fstat(int fd, struct stat *st)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    int cache_idx = elf_cache_fds[fd_idx].cache_idx;
+
+    memset(st, 0, sizeof(*st));
+    st->st_mode = elf_cache[cache_idx].mode;
+    st->st_size = elf_cache[cache_idx].size;
+    st->st_ino = 1000000 + cache_idx;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    st->st_blocks = (st->st_size + 511) / 512;
+
+    return 0;
+}
+
+/* Stat by path from cache */
+int elf_cache_stat(const char *path, struct stat *st)
+{
+    elf_cache_init();
+
+    int cache_idx = elf_cache_find(path);
+    if (cache_idx < 0) {
+        return -1;
+    }
+
+    memset(st, 0, sizeof(*st));
+    st->st_mode = elf_cache[cache_idx].mode;
+    st->st_size = elf_cache[cache_idx].size;
+    st->st_ino = 1000000 + cache_idx;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    st->st_blocks = (st->st_size + 511) / 512;
+
+    return 0;
+}
+
+/* Close cached file */
+int elf_cache_close(int fd)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    int cache_idx = elf_cache_fds[fd_idx].cache_idx;
+
+    elf_cache_fds[fd_idx].active = 0;
+    if (elf_cache[cache_idx].refcount > 0) {
+        elf_cache[cache_idx].refcount--;
+    }
+
+    return 0;
+}
+
+/* Vectored read from cache */
+ssize_t elf_cache_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset)
+{
+    if (!elf_cache_is_cache_fd(fd)) {
+        return -1;
+    }
+
+    int fd_idx = fd - ELF_CACHE_FD_BASE;
+    int cache_idx = elf_cache_fds[fd_idx].cache_idx;
+
+    if (!elf_cache[cache_idx].active) {
+        return -1;
+    }
+
+    size_t file_size = elf_cache[cache_idx].size;
+    if (offset >= (off_t)file_size) {
+        return 0;  /* EOF */
+    }
+
+    size_t total_read = 0;
+    off_t cur_offset = offset;
+
+    for (int i = 0; i < iovcnt && cur_offset < (off_t)file_size; i++) {
+        size_t available = file_size - cur_offset;
+        size_t to_read = iov[i].iov_len < available ? iov[i].iov_len : available;
+
+        memcpy(iov[i].iov_base, elf_cache[cache_idx].data + cur_offset, to_read);
+        total_read += to_read;
+        cur_offset += to_read;
+
+        if (to_read < iov[i].iov_len) {
+            break;  /* EOF reached */
+        }
+    }
+
+    return total_read;
+}
+
 /* Check if SABFS module is loaded and available */
 EM_JS(int, sabfs_js_is_available, (void), {
     const available = (typeof SABFS !== 'undefined' &&

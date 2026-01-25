@@ -444,6 +444,42 @@ EM_JS(void, syscall_pvproc_log, (const char *msg), {
 });
 
 /*
+ * ELF Cache preload - Trigger file preload before execve
+ * This caches the executable file so 9p reads are fast.
+ * Returns: 1 if file was preloaded, 0 otherwise
+ */
+EM_JS(int, syscall_elf_cache_preload, (const char *path), {
+    const pathStr = UTF8ToString(path);
+
+    /* Try ELF_CACHE first */
+    if (typeof ELF_CACHE !== 'undefined') {
+        if (ELF_CACHE.isCached(pathStr)) {
+            console.log('[ELF-Preload] Already cached:', pathStr);
+            return 1;
+        }
+        /* Start async preload */
+        ELF_CACHE.preload(pathStr).then(success => {
+            if (success) {
+                console.log('[ELF-Preload] Cached:', pathStr);
+            }
+        }).catch(e => {
+            console.error('[ELF-Preload] Error:', e);
+        });
+        return 0;  /* Preload started but not complete */
+    }
+
+    /* Fallback: try SABFS directly */
+    if (typeof SABFS !== 'undefined' && SABFS.exists) {
+        if (SABFS.exists(pathStr)) {
+            console.log('[ELF-Preload] File in SABFS:', pathStr);
+            return 1;
+        }
+    }
+
+    return 0;
+});
+
+/*
  * Simulated process table for fast-path execution.
  * When we intercept fork+execve for simple commands, we track them here
  * and return results directly without creating real guest processes.
@@ -578,13 +614,23 @@ static int pvproc_try_intercept(CPUX86State *env, int next_eip_addend)
                 return 0;  /* Let modified syscall proceed */
             }
 
+            /*
+             * ELF Cache: Preload the executable file.
+             * This caches the file so subsequent 9p reads are served from memory.
+             * The cache is checked in local_open/local_preadv in 9p-local.c.
+             */
+            int preloaded = syscall_elf_cache_preload(path);
+            if (preloaded) {
+                snprintf(msg, sizeof(msg), "ELF cached: %s", path);
+                syscall_pvproc_log(msg);
+            }
+
             if (pvproc_ok) {
-                /* Try to handle via PVPROC */
+                /* Notify PVPROC about exec */
                 int ret = syscall_pvproc_execve(path, arg2, arg3);
                 if (ret == 0) {
-                    snprintf(msg, sizeof(msg), "execve handled by PVPROC");
+                    snprintf(msg, sizeof(msg), "execve notified PVPROC");
                     syscall_pvproc_log(msg);
-                    /* Note: Full implementation would set up new process state */
                 }
             }
             /* Fall through to kernel for normal execution */

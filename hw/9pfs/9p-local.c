@@ -498,6 +498,10 @@ static ssize_t local_readlink(FsContext *fs_ctx, V9fsPath *fs_path,
 static int local_close(FsContext *ctx, V9fsFidOpenState *fs)
 {
 #ifdef __EMSCRIPTEN__
+    /* ELF Cache: Check if this is a cached file fd */
+    if (elf_cache_is_cache_fd(fs->fd)) {
+        return elf_cache_close(fs->fd);
+    }
     /* Clean up SABFS mapping */
     sabfs_fd_map_remove(fs->fd);
 #endif
@@ -513,6 +517,20 @@ static int local_open(FsContext *ctx, V9fsPath *fs_path,
                       int flags, V9fsFidOpenState *fs)
 {
     int fd;
+
+#ifdef __EMSCRIPTEN__
+    /*
+     * ELF Cache: Check if file is cached for fast execve.
+     * If cached, use the cache fd directly (no POSIX open needed for reads).
+     */
+    if (elf_cache_is_cached(fs_path->data)) {
+        int cache_fd = elf_cache_open(fs_path->data);
+        if (cache_fd >= 0) {
+            fs->fd = cache_fd;
+            return cache_fd;
+        }
+    }
+#endif
 
     fd = local_open_nofollow(ctx, fs_path->data, flags, 0);
     if (fd == -1) {
@@ -613,7 +631,11 @@ static ssize_t local_preadv(FsContext *ctx, V9fsFidOpenState *fs,
                             int iovcnt, off_t offset)
 {
 #ifdef __EMSCRIPTEN__
-    /* Try SABFS first - bypasses Emscripten's syscall proxy */
+    /* ELF Cache: Check if this is a cached file fd */
+    if (elf_cache_is_cache_fd(fs->fd)) {
+        return elf_cache_preadv(fs->fd, iov, iovcnt, offset);
+    }
+    /* Try SABFS next - bypasses Emscripten's syscall proxy */
     if (sabfs_fd_map_get(fs->fd) >= 0) {
         return sabfs_preadv(fs->fd, iov, iovcnt, offset);
     }
@@ -808,6 +830,17 @@ static int local_fstat(FsContext *fs_ctx, int fid_type,
     } else {
         fd = fs->fd;
     }
+
+#ifdef __EMSCRIPTEN__
+    /* ELF Cache: Check if this is a cached file fd */
+    if (elf_cache_is_cache_fd(fd)) {
+        err = elf_cache_fstat(fd, stbuf);
+        if (err == 0) {
+            return 0;  /* Success, skip xattr handling */
+        }
+        /* Fall through to normal fstat on error */
+    }
+#endif
 
     err = fstat(fd, stbuf);
     if (err) {
