@@ -384,7 +384,10 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
                         pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", tmp[i]);
                     }
                     syscall_sabfs_log(hex);
+                    snprintf(dbg, sizeof(dbg), "write_guest_buffer: addr=0x%lx len=%d", (unsigned long)arg2, n);
+                    syscall_sabfs_log(dbg);
                     write_guest_buffer(env, arg2, tmp, n);
+                    syscall_sabfs_log("write_guest_buffer completed");
                     /* Verify write by reading back */
                     uint8_t verify = cpu_ldub_data(env, arg2);
                     snprintf(dbg, sizeof(dbg), "verify first byte: wrote=%02x read=%02x", tmp[0], verify);
