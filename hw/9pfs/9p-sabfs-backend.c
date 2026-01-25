@@ -20,7 +20,7 @@
 
 /* ========== JavaScript SABFS bindings ========== */
 
-EM_JS(int, sabfs_js_stat, (const char *path,
+EM_JS(int, sabfs_be_js_stat, (const char *path,
                            uint32_t *mode, uint32_t *nlink,
                            uint32_t *uid, uint32_t *gid,
                            uint32_t *size_lo, uint32_t *size_hi,
@@ -45,7 +45,7 @@ EM_JS(int, sabfs_js_stat, (const char *path,
     return 0;
 });
 
-EM_JS(int, sabfs_js_lstat, (const char *path,
+EM_JS(int, sabfs_be_js_lstat, (const char *path,
                             uint32_t *mode, uint32_t *nlink,
                             uint32_t *uid, uint32_t *gid,
                             uint32_t *size_lo, uint32_t *size_hi,
@@ -70,18 +70,18 @@ EM_JS(int, sabfs_js_lstat, (const char *path,
     return 0;
 });
 
-EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
+EM_JS(int, sabfs_be_js_open, (const char *path, int flags, int mode), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.open(pathStr, flags, mode);
 });
 
-EM_JS(int, sabfs_js_close, (int fd), {
+EM_JS(int, sabfs_be_js_close, (int fd), {
     if (typeof SABFS === 'undefined') return -1;
     return SABFS.close(fd);
 });
 
-EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset), {
+EM_JS(ssize_t, sabfs_be_js_pread, (int fd, void *buf, size_t count, double offset), {
     if (typeof SABFS === 'undefined') return -1;
     const buffer = new Uint8Array(count);
     const ret = SABFS.pread(fd, buffer, count, offset);
@@ -91,45 +91,45 @@ EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset),
     return ret;
 });
 
-EM_JS(ssize_t, sabfs_js_pwrite, (int fd, const void *buf, size_t count, double offset), {
+EM_JS(ssize_t, sabfs_be_js_pwrite, (int fd, const void *buf, size_t count, double offset), {
     if (typeof SABFS === 'undefined') return -1;
     const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
     return SABFS.pwrite(fd, buffer, count, offset);
 });
 
-EM_JS(int, sabfs_js_mkdir, (const char *path, int mode), {
+EM_JS(int, sabfs_be_js_mkdir, (const char *path, int mode), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.mkdir(pathStr, mode);
 });
 
-EM_JS(int, sabfs_js_rmdir, (const char *path), {
+EM_JS(int, sabfs_be_js_rmdir, (const char *path), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.rmdir(pathStr);
 });
 
-EM_JS(int, sabfs_js_unlink, (const char *path), {
+EM_JS(int, sabfs_be_js_unlink, (const char *path), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.unlink(pathStr);
 });
 
-EM_JS(int, sabfs_js_rename, (const char *oldpath, const char *newpath), {
+EM_JS(int, sabfs_be_js_rename, (const char *oldpath, const char *newpath), {
     if (typeof SABFS === 'undefined') return -1;
     const oldStr = UTF8ToString(oldpath);
     const newStr = UTF8ToString(newpath);
     return SABFS.rename(oldStr, newStr);
 });
 
-EM_JS(int, sabfs_js_symlink, (const char *target, const char *linkpath), {
+EM_JS(int, sabfs_be_js_symlink, (const char *target, const char *linkpath), {
     if (typeof SABFS === 'undefined') return -1;
     const targetStr = UTF8ToString(target);
     const linkStr = UTF8ToString(linkpath);
     return SABFS.symlink(targetStr, linkStr);
 });
 
-EM_JS(int, sabfs_js_readlink, (const char *path, char *buf, size_t bufsiz), {
+EM_JS(int, sabfs_be_js_readlink, (const char *path, char *buf, size_t bufsiz), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     const target = SABFS.readlink(pathStr);
@@ -141,39 +141,39 @@ EM_JS(int, sabfs_js_readlink, (const char *path, char *buf, size_t bufsiz), {
     return len;
 });
 
-EM_JS(int, sabfs_js_link, (const char *oldpath, const char *newpath), {
+EM_JS(int, sabfs_be_js_link, (const char *oldpath, const char *newpath), {
     if (typeof SABFS === 'undefined') return -1;
     const oldStr = UTF8ToString(oldpath);
     const newStr = UTF8ToString(newpath);
     return SABFS.link(oldStr, newStr);
 });
 
-EM_JS(int, sabfs_js_chmod, (const char *path, int mode), {
+EM_JS(int, sabfs_be_js_chmod, (const char *path, int mode), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.chmod(pathStr, mode);
 });
 
-EM_JS(int, sabfs_js_chown, (const char *path, int uid, int gid), {
+EM_JS(int, sabfs_be_js_chown, (const char *path, int uid, int gid), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.chown(pathStr, uid, gid);
 });
 
-EM_JS(int, sabfs_js_truncate, (const char *path, double length), {
+EM_JS(int, sabfs_be_js_truncate, (const char *path, double length), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.truncate(pathStr, length);
 });
 
-EM_JS(int, sabfs_js_utimes, (const char *path, double atime, double mtime), {
+EM_JS(int, sabfs_be_js_utimes, (const char *path, double atime, double mtime), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     return SABFS.utimes(pathStr, atime, mtime);
 });
 
 /* Directory reading - returns JSON array of entries */
-EM_JS(int, sabfs_js_readdir_count, (const char *path), {
+EM_JS(int, sabfs_be_js_readdir_count, (const char *path), {
     if (typeof SABFS === 'undefined') return -1;
     const pathStr = UTF8ToString(path);
     const entries = SABFS.readdir(pathStr);
@@ -183,7 +183,7 @@ EM_JS(int, sabfs_js_readdir_count, (const char *path), {
     return entries.length;
 });
 
-EM_JS(int, sabfs_js_readdir_entry, (int idx, char *name, size_t name_size, uint32_t *ino, uint32_t *type), {
+EM_JS(int, sabfs_be_js_readdir_entry, (int idx, char *name, size_t name_size, uint32_t *ino, uint32_t *type), {
     const entries = globalThis._sabfs_readdir_entries;
     if (!entries || idx >= entries.length) return -1;
 
@@ -197,7 +197,7 @@ EM_JS(int, sabfs_js_readdir_entry, (int idx, char *name, size_t name_size, uint3
     return 0;
 });
 
-EM_JS(int, sabfs_js_statfs, (uint32_t *bsize, uint32_t *blocks, uint32_t *bfree,
+EM_JS(int, sabfs_be_js_statfs, (uint32_t *bsize, uint32_t *blocks, uint32_t *bfree,
                              uint32_t *files, uint32_t *ffree), {
     if (typeof SABFS === 'undefined' || !SABFS.statfs) return -1;
     const st = SABFS.statfs();
@@ -211,7 +211,7 @@ EM_JS(int, sabfs_js_statfs, (uint32_t *bsize, uint32_t *blocks, uint32_t *bfree,
     return 0;
 });
 
-EM_JS(int, sabfs_js_is_available, (void), {
+EM_JS(int, sabfs_be_js_is_available, (void), {
     return (typeof SABFS !== 'undefined' && SABFS.stat) ? 1 : 0;
 });
 
@@ -230,7 +230,7 @@ typedef struct SabfsDirState {
 
 static int sabfs_init(FsContext *ctx, Error **errp)
 {
-    if (!sabfs_js_is_available()) {
+    if (!sabfs_be_js_is_available()) {
         error_setg(errp, "SABFS not available");
         return -1;
     }
@@ -247,7 +247,7 @@ static int sabfs_lstat(FsContext *ctx, V9fsPath *fs_path, struct stat *stbuf)
     uint32_t mode, nlink, uid, gid, size_lo, size_hi;
     uint32_t atime, mtime, ctime, ino, blocks;
 
-    int ret = sabfs_js_lstat(fs_path->data, &mode, &nlink, &uid, &gid,
+    int ret = sabfs_be_js_lstat(fs_path->data, &mode, &nlink, &uid, &gid,
                               &size_lo, &size_hi, &atime, &mtime, &ctime,
                               &ino, &blocks);
     if (ret < 0) {
@@ -274,7 +274,7 @@ static int sabfs_lstat(FsContext *ctx, V9fsPath *fs_path, struct stat *stbuf)
 static ssize_t sabfs_readlink(FsContext *ctx, V9fsPath *fs_path,
                               char *buf, size_t bufsz)
 {
-    int ret = sabfs_js_readlink(fs_path->data, buf, bufsz);
+    int ret = sabfs_be_js_readlink(fs_path->data, buf, bufsz);
     if (ret < 0) {
         errno = EINVAL;
         return -1;
@@ -286,7 +286,7 @@ static int sabfs_close(FsContext *ctx, V9fsFidOpenState *fs)
 {
     SabfsFileState *state = (SabfsFileState *)fs->private;
     if (state) {
-        sabfs_js_close(state->fd);
+        sabfs_be_js_close(state->fd);
         g_free(state);
         fs->private = NULL;
     }
@@ -306,7 +306,7 @@ static int sabfs_closedir(FsContext *ctx, V9fsFidOpenState *fs)
 static int sabfs_open(FsContext *ctx, V9fsPath *fs_path,
                       int flags, V9fsFidOpenState *fs)
 {
-    int fd = sabfs_js_open(fs_path->data, flags, 0);
+    int fd = sabfs_be_js_open(fs_path->data, flags, 0);
     if (fd < 0) {
         errno = ENOENT;
         return -1;
@@ -323,7 +323,7 @@ static int sabfs_open(FsContext *ctx, V9fsPath *fs_path,
 static int sabfs_opendir(FsContext *ctx, V9fsPath *fs_path,
                          V9fsFidOpenState *fs)
 {
-    int count = sabfs_js_readdir_count(fs_path->data);
+    int count = sabfs_be_js_readdir_count(fs_path->data);
     if (count < 0) {
         errno = ENOENT;
         return -1;
@@ -344,7 +344,7 @@ static void sabfs_rewinddir(FsContext *ctx, V9fsFidOpenState *fs)
     if (state) {
         state->pos = 0;
         /* Refresh entries */
-        state->count = sabfs_js_readdir_count(state->path);
+        state->count = sabfs_be_js_readdir_count(state->path);
     }
 }
 
@@ -364,7 +364,7 @@ static struct dirent *sabfs_readdir(FsContext *ctx, V9fsFidOpenState *fs)
     }
 
     uint32_t ino, type;
-    if (sabfs_js_readdir_entry(state->pos, entry.d_name, sizeof(entry.d_name),
+    if (sabfs_be_js_readdir_entry(state->pos, entry.d_name, sizeof(entry.d_name),
                                 &ino, &type) < 0) {
         return NULL;
     }
@@ -395,7 +395,7 @@ static ssize_t sabfs_preadv(FsContext *ctx, V9fsFidOpenState *fs,
 
     ssize_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
-        ssize_t ret = sabfs_js_pread(state->fd, iov[i].iov_base,
+        ssize_t ret = sabfs_be_js_pread(state->fd, iov[i].iov_base,
                                       iov[i].iov_len, offset + total);
         if (ret < 0) {
             if (total == 0) return -1;
@@ -420,7 +420,7 @@ static ssize_t sabfs_pwritev(FsContext *ctx, V9fsFidOpenState *fs,
 
     ssize_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
-        ssize_t ret = sabfs_js_pwrite(state->fd, iov[i].iov_base,
+        ssize_t ret = sabfs_be_js_pwrite(state->fd, iov[i].iov_base,
                                        iov[i].iov_len, offset + total);
         if (ret < 0) {
             if (total == 0) return -1;
@@ -435,7 +435,7 @@ static ssize_t sabfs_pwritev(FsContext *ctx, V9fsFidOpenState *fs,
 
 static int sabfs_chmod(FsContext *ctx, V9fsPath *fs_path, FsCred *credp)
 {
-    return sabfs_js_chmod(fs_path->data, credp->fc_mode);
+    return sabfs_be_js_chmod(fs_path->data, credp->fc_mode);
 }
 
 static int sabfs_mknod(FsContext *ctx, V9fsPath *fs_path, const char *name,
@@ -445,12 +445,12 @@ static int sabfs_mknod(FsContext *ctx, V9fsPath *fs_path, const char *name,
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", fs_path->data, name);
 
-    int fd = sabfs_js_open(path, 0x40 | 0x200, credp->fc_mode); /* O_CREAT | O_TRUNC */
+    int fd = sabfs_be_js_open(path, 0x40 | 0x200, credp->fc_mode); /* O_CREAT | O_TRUNC */
     if (fd < 0) {
         errno = EPERM;
         return -1;
     }
-    sabfs_js_close(fd);
+    sabfs_be_js_close(fd);
     return 0;
 }
 
@@ -459,7 +459,7 @@ static int sabfs_mkdir(FsContext *ctx, V9fsPath *fs_path, const char *name,
 {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", fs_path->data, name);
-    return sabfs_js_mkdir(path, credp->fc_mode);
+    return sabfs_be_js_mkdir(path, credp->fc_mode);
 }
 
 static int sabfs_fstat(FsContext *ctx, int fid_type,
@@ -474,7 +474,7 @@ static int sabfs_fstat(FsContext *ctx, int fid_type,
         uint32_t mode, nlink, uid, gid, size_lo, size_hi;
         uint32_t atime, mtime, ctime, ino, blocks;
 
-        if (sabfs_js_stat(state->path, &mode, &nlink, &uid, &gid,
+        if (sabfs_be_js_stat(state->path, &mode, &nlink, &uid, &gid,
                           &size_lo, &size_hi, &atime, &mtime, &ctime,
                           &ino, &blocks) < 0) {
             errno = ENOENT;
@@ -503,7 +503,7 @@ static int sabfs_fstat(FsContext *ctx, int fid_type,
         uint32_t mode, nlink, uid, gid, size_lo, size_hi;
         uint32_t atime, mtime, ctime, ino, blocks;
 
-        if (sabfs_js_stat(state->path, &mode, &nlink, &uid, &gid,
+        if (sabfs_be_js_stat(state->path, &mode, &nlink, &uid, &gid,
                           &size_lo, &size_hi, &atime, &mtime, &ctime,
                           &ino, &blocks) < 0) {
             errno = ENOENT;
@@ -532,7 +532,7 @@ static int sabfs_open2(FsContext *ctx, V9fsPath *fs_path, const char *name,
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", fs_path->data, name);
 
-    int fd = sabfs_js_open(path, flags | 0x40, credp->fc_mode); /* O_CREAT */
+    int fd = sabfs_be_js_open(path, flags | 0x40, credp->fc_mode); /* O_CREAT */
     if (fd < 0) {
         errno = ENOENT;
         return -1;
@@ -551,7 +551,7 @@ static int sabfs_symlink(FsContext *ctx, const char *oldpath,
 {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", fs_path->data, name);
-    return sabfs_js_symlink(oldpath, path);
+    return sabfs_be_js_symlink(oldpath, path);
 }
 
 static int sabfs_link(FsContext *ctx, V9fsPath *oldpath,
@@ -559,22 +559,22 @@ static int sabfs_link(FsContext *ctx, V9fsPath *oldpath,
 {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", newpath->data, name);
-    return sabfs_js_link(oldpath->data, path);
+    return sabfs_be_js_link(oldpath->data, path);
 }
 
 static int sabfs_truncate(FsContext *ctx, V9fsPath *fs_path, off_t size)
 {
-    return sabfs_js_truncate(fs_path->data, (double)size);
+    return sabfs_be_js_truncate(fs_path->data, (double)size);
 }
 
 static int sabfs_rename(FsContext *ctx, const char *oldpath, const char *newpath)
 {
-    return sabfs_js_rename(oldpath, newpath);
+    return sabfs_be_js_rename(oldpath, newpath);
 }
 
 static int sabfs_chown(FsContext *ctx, V9fsPath *fs_path, FsCred *credp)
 {
-    return sabfs_js_chown(fs_path->data, credp->fc_uid, credp->fc_gid);
+    return sabfs_be_js_chown(fs_path->data, credp->fc_uid, credp->fc_gid);
 }
 
 static int sabfs_utimensat(FsContext *ctx, V9fsPath *fs_path,
@@ -582,14 +582,14 @@ static int sabfs_utimensat(FsContext *ctx, V9fsPath *fs_path,
 {
     double atime = ts[0].tv_sec + ts[0].tv_nsec / 1e9;
     double mtime = ts[1].tv_sec + ts[1].tv_nsec / 1e9;
-    return sabfs_js_utimes(fs_path->data, atime, mtime);
+    return sabfs_be_js_utimes(fs_path->data, atime, mtime);
 }
 
 static int sabfs_remove(FsContext *ctx, const char *path)
 {
     /* Try unlink first, then rmdir */
-    if (sabfs_js_unlink(path) == 0) return 0;
-    return sabfs_js_rmdir(path);
+    if (sabfs_be_js_unlink(path) == 0) return 0;
+    return sabfs_be_js_rmdir(path);
 }
 
 static int sabfs_fsync(FsContext *ctx, int fid_type,
@@ -603,7 +603,7 @@ static int sabfs_statfs(FsContext *ctx, V9fsPath *fs_path, struct statfs *stbuf)
 {
     uint32_t bsize, blocks, bfree, files, ffree;
 
-    if (sabfs_js_statfs(&bsize, &blocks, &bfree, &files, &ffree) < 0) {
+    if (sabfs_be_js_statfs(&bsize, &blocks, &bfree, &files, &ffree) < 0) {
         /* Provide defaults */
         bsize = 4096;
         blocks = 1024 * 1024;
@@ -685,7 +685,7 @@ static int sabfs_renameat(FsContext *ctx, V9fsPath *olddir,
     char oldpath[PATH_MAX], newpath[PATH_MAX];
     snprintf(oldpath, sizeof(oldpath), "%s/%s", olddir->data, old_name);
     snprintf(newpath, sizeof(newpath), "%s/%s", newdir->data, new_name);
-    return sabfs_js_rename(oldpath, newpath);
+    return sabfs_be_js_rename(oldpath, newpath);
 }
 
 static int sabfs_unlinkat(FsContext *ctx, V9fsPath *dir,
@@ -695,9 +695,9 @@ static int sabfs_unlinkat(FsContext *ctx, V9fsPath *dir,
     snprintf(path, sizeof(path), "%s/%s", dir->data, name);
 
     if (flags & AT_REMOVEDIR) {
-        return sabfs_js_rmdir(path);
+        return sabfs_be_js_rmdir(path);
     }
-    return sabfs_js_unlink(path);
+    return sabfs_be_js_unlink(path);
 }
 
 FileOperations sabfs_ops = {
