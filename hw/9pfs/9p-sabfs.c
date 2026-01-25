@@ -101,61 +101,92 @@ static int elf_cache_find_free(void)
     return -1;
 }
 
-/* Preload file into ELF cache - called from JavaScript */
-EM_JS(int, elf_cache_js_preload, (const char *path, void *buf, size_t max_size), {
-    const pathStr = UTF8ToString(path);
-    console.log('[ELF-Cache] Preloading:', pathStr);
+/*
+ * Preload file using POSIX I/O - this goes through Emscripten's syscalls
+ * which properly access the 9p-mounted container filesystem.
+ *
+ * The 9p export directory is /mnt/wasi1 (container rootfs).
+ * Guest paths like /bin/ls map to host /mnt/wasi1/bin/ls.
+ */
+#include <fcntl.h>
+#include <unistd.h>
 
-    try {
-        /* First try ELF_CACHE if available */
-        if (typeof ELF_CACHE !== 'undefined' && ELF_CACHE.isCached(pathStr)) {
-            const data = ELF_CACHE.getFileDataByPath(pathStr);
-            if (data && data.length <= max_size) {
-                HEAPU8.set(data, buf);
-                console.log('[ELF-Cache] Loaded from JS cache:', data.length, 'bytes');
-                return data.length;
-            }
-        }
+/* Log function for preload status */
+EM_JS(void, elf_cache_log, (const char *msg), {
+    console.log('[ELF-Cache]', UTF8ToString(msg));
+});
 
-        /* Then try SABFS */
-        if (typeof SABFS !== 'undefined' && SABFS.exportFile) {
-            const data = SABFS.exportFile(pathStr);
-            if (data && data.length <= max_size) {
-                HEAPU8.set(data, buf);
-                console.log('[ELF-Cache] Loaded from SABFS:', data.length, 'bytes');
-                return data.length;
-            }
-        }
+static int elf_cache_posix_preload(const char *path, void *buf, size_t max_size)
+{
+    char host_path[512];
+    char log_msg[256];
+    struct stat st;
+    int fd;
+    ssize_t total_read = 0;
+    ssize_t bytes_read;
 
-        /* Fallback: try Emscripten FS (which backs 9p mount) */
-        /* This reads the file via 9p, but only once - cache serves subsequent reads */
-        if (typeof FS !== 'undefined') {
-            try {
-                /* Map 9p paths: guest /bin -> host /mnt/wasi1/bin, etc. */
-                let hostPath = pathStr;
-                if (pathStr.startsWith('/bin/') || pathStr.startsWith('/lib/') ||
-                    pathStr.startsWith('/usr/') || pathStr.startsWith('/sbin/')) {
-                    hostPath = '/mnt/wasi1' + pathStr;
-                }
+    /* Map guest path to host path:
+     * Guest /bin/ls -> Host /mnt/wasi1/bin/ls
+     * Guest /usr/bin/env -> Host /mnt/wasi1/usr/bin/env
+     */
+    if (strncmp(path, "/bin/", 5) == 0 ||
+        strncmp(path, "/lib/", 5) == 0 ||
+        strncmp(path, "/usr/", 5) == 0 ||
+        strncmp(path, "/sbin/", 6) == 0 ||
+        strncmp(path, "/etc/", 5) == 0 ||
+        strncmp(path, "/opt/", 5) == 0) {
+        snprintf(host_path, sizeof(host_path), "/mnt/wasi1%s", path);
+    } else {
+        /* For other paths, try direct */
+        strncpy(host_path, path, sizeof(host_path) - 1);
+        host_path[sizeof(host_path) - 1] = '\0';
+    }
 
-                const data = FS.readFile(hostPath);
-                if (data && data.length <= max_size) {
-                    HEAPU8.set(data, buf);
-                    console.log('[ELF-Cache] Loaded from FS:', data.length, 'bytes (', hostPath, ')');
-                    return data.length;
-                }
-            } catch (fsErr) {
-                console.log('[ELF-Cache] FS.readFile failed:', fsErr.message);
-            }
-        }
+    snprintf(log_msg, sizeof(log_msg), "Preloading: %s -> %s", path, host_path);
+    elf_cache_log(log_msg);
 
-        console.log('[ELF-Cache] File not found:', pathStr);
-        return -1;
-    } catch (e) {
-        console.error('[ELF-Cache] Preload error:', e);
+    /* Stat to get file size */
+    if (stat(host_path, &st) < 0) {
+        snprintf(log_msg, sizeof(log_msg), "stat failed: %s (errno=%d)", host_path, errno);
+        elf_cache_log(log_msg);
         return -1;
     }
-});
+
+    if ((size_t)st.st_size > max_size) {
+        snprintf(log_msg, sizeof(log_msg), "File too large: %ld > %lu", (long)st.st_size, (unsigned long)max_size);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    /* Open file */
+    fd = open(host_path, O_RDONLY);
+    if (fd < 0) {
+        snprintf(log_msg, sizeof(log_msg), "open failed: %s (errno=%d)", host_path, errno);
+        elf_cache_log(log_msg);
+        return -1;
+    }
+
+    /* Read entire file */
+    while (total_read < st.st_size) {
+        bytes_read = read(fd, (uint8_t *)buf + total_read, st.st_size - total_read);
+        if (bytes_read < 0) {
+            if (errno == EINTR) continue;
+            snprintf(log_msg, sizeof(log_msg), "read failed at %ld (errno=%d)", (long)total_read, errno);
+            elf_cache_log(log_msg);
+            close(fd);
+            return -1;
+        }
+        if (bytes_read == 0) break;  /* EOF */
+        total_read += bytes_read;
+    }
+
+    close(fd);
+
+    snprintf(log_msg, sizeof(log_msg), "Loaded %ld bytes from %s", (long)total_read, host_path);
+    elf_cache_log(log_msg);
+
+    return (int)total_read;
+}
 
 /* Public API: Preload file into cache */
 int elf_cache_preload(const char *path)
@@ -181,8 +212,8 @@ int elf_cache_preload(const char *path)
         return -1;
     }
 
-    /* Load file from JavaScript */
-    int size = elf_cache_js_preload(path, buf, ELF_CACHE_MAX_FILE_SIZE);
+    /* Load file using POSIX I/O (goes through 9p for container files) */
+    int size = elf_cache_posix_preload(path, buf, ELF_CACHE_MAX_FILE_SIZE);
     if (size < 0) {
         free(buf);
         return -1;
