@@ -463,15 +463,16 @@ ssize_t elf_cache_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offs
 
 /* Check if SABFS module is loaded and available */
 EM_JS(int, sabfs_js_is_available, (void), {
-    const available = (typeof SABFS !== 'undefined' &&
-            typeof SABFS.stat === 'function') ? 1 : 0;
+    const SABFS = globalThis.SABFS;
+    const available = (SABFS && typeof SABFS.stat === 'function') ? 1 : 0;
     console.log('[SABFS C] is_available:', available);
     return available;
 });
 
 /* Check if SABFS is initialized with data */
 EM_JS(int, sabfs_js_is_ready, (void), {
-    if (typeof SABFS === 'undefined') {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) {
         console.log('[SABFS C] is_ready: SABFS undefined');
         return 0;
     }
@@ -488,6 +489,8 @@ EM_JS(int, sabfs_js_is_ready, (void), {
 
 /* Open file in SABFS */
 EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     try {
         const pathStr = UTF8ToString(path);
         console.log('[SABFS C] open:', pathStr, 'flags:', flags);
@@ -502,6 +505,8 @@ EM_JS(int, sabfs_js_open, (const char *path, int flags, int mode), {
 
 /* Close file in SABFS */
 EM_JS(int, sabfs_js_close, (int fd), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     try {
         return SABFS.close(fd);
     } catch (e) {
@@ -511,6 +516,8 @@ EM_JS(int, sabfs_js_close, (int fd), {
 
 /* Read from file at offset (pread) */
 EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     try {
         const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
         return SABFS.pread(fd, buffer, count, offset);
@@ -522,6 +529,8 @@ EM_JS(ssize_t, sabfs_js_pread, (int fd, void *buf, size_t count, double offset),
 
 /* Write to file at offset (pwrite) */
 EM_JS(ssize_t, sabfs_js_pwrite, (int fd, const void *buf, size_t count, double offset), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     try {
         const buffer = new Uint8Array(HEAPU8.buffer, buf, count);
         return SABFS.pwrite(fd, buffer, count, offset);
@@ -536,6 +545,8 @@ EM_JS(int, sabfs_js_stat, (const char *path,
                            uint32_t *mode,
                            uint32_t *size_lo, uint32_t *size_hi,
                            uint32_t *ino), {
+    const SABFS = globalThis.SABFS;
+    if (!SABFS) return -1;
     try {
         const pathStr = UTF8ToString(path);
         const st = SABFS.stat(pathStr);
