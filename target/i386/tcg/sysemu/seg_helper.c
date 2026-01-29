@@ -23,6 +23,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu_ldst.h"
+#include "exec/exec-all.h"
 #include "tcg/helper-tcg.h"
 #include "../seg_helper.h"
 
@@ -69,12 +70,8 @@ EM_JS(int, syscall_sabfs_available, (void), {
 EM_JS(int, syscall_sabfs_open, (const char *path, int flags), {
     try {
         const pathStr = UTF8ToString(path);
-        console.log('[SYSCALL-SABFS] open:', pathStr, 'flags:', flags);
-        const fd = SABFS.open(pathStr, flags, 0o644);
-        console.log('[SYSCALL-SABFS] open result:', fd);
-        return fd;
+        return SABFS.open(pathStr, flags, 0o644);
     } catch (e) {
-        console.log('[SYSCALL-SABFS] open error:', e.message);
         return -1;
     }
 });
@@ -263,13 +260,41 @@ static void read_guest_buffer(CPUX86State *env, uint64_t guest_addr, void *buf, 
 
 /*
  * Copy data from host buffer to guest virtual memory.
+ *
+ * During syscall interception, we're in kernel mode (CPL=0) but need to
+ * write to userspace buffers. With SMAP enabled, the default MMU index
+ * (MMU_KSMAP_IDX) would deny access to user pages.
+ *
+ * We use MMU_KNOSMAP_IDX (kernel without SMAP) which allows kernel-mode
+ * access to user pages. This is equivalent to what the kernel does during
+ * copy_to_user() after executing STAC instruction.
  */
-static void write_guest_buffer(CPUX86State *env, uint64_t guest_addr, const void *buf, int len)
+static int write_guest_buffer(CPUX86State *env, uint64_t guest_addr, const void *buf, int len)
 {
     const uint8_t *p = buf;
-    for (int i = 0; i < len; i++) {
-        cpu_stb_data(env, guest_addr + i, p[i]);
+    int written = 0;
+
+    /*
+     * Try probe_access first to check if the page is accessible.
+     * This should trigger any needed page faults before we try to write.
+     */
+    void *host_ptr = probe_access(env, guest_addr, len, MMU_DATA_STORE,
+                                   MMU_KNOSMAP_IDX, GETPC());
+    if (host_ptr) {
+        /* Direct host access is possible - fast path */
+        memcpy(host_ptr, buf, len);
+        return len;
     }
+
+    /*
+     * Fallback: Write byte-by-byte using cpu_stb_mmuidx_ra() with MMU_KNOSMAP_IDX.
+     * This bypasses SMAP protection, allowing kernel-mode writes to user pages.
+     */
+    for (written = 0; written < len; written++) {
+        cpu_stb_mmuidx_ra(env, guest_addr + written, p[written], MMU_KNOSMAP_IDX, 0);
+    }
+
+    return written;
 }
 
 /*
@@ -289,27 +314,6 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
     /* Only intercept in 64-bit mode */
     if (!(env->hflags & HF_LMA_MASK)) {
         return 0;
-    }
-
-    /* Log syscalls we care about for debugging */
-    static int debug_count = 0;
-    if ((syscall_nr == SYS_open || syscall_nr == SYS_openat) && debug_count < 50) {
-        debug_count++;
-        char path[512];
-        uint64_t path_addr = (syscall_nr == SYS_openat) ? arg2 : arg1;
-        read_guest_string(env, path_addr, path, sizeof(path));
-        syscall_sabfs_log_nr(syscall_nr, path);
-    }
-    /* Also log read/write/close/dup to see what fds are being used */
-    if (syscall_nr == SYS_read || syscall_nr == SYS_write || syscall_nr == SYS_close) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "fd=%d count=%d", (int)arg1, (int)arg3);
-        syscall_sabfs_log_nr(syscall_nr, msg);
-    }
-    if (syscall_nr == SYS_dup || syscall_nr == SYS_dup2 || syscall_nr == SYS_dup3) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "oldfd=%d newfd=%d", (int)arg1, (int)arg2);
-        syscall_sabfs_log_nr(syscall_nr, msg);
     }
 
     /* Check if SABFS is available (check every time since it may be attached later) */
@@ -355,11 +359,6 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             int guest_fd = arg1;
             int sabfs_fd = sabfs_get_fd(guest_fd);
 
-            /* Debug: log fd mapping */
-            char dbg[128];
-            snprintf(dbg, sizeof(dbg), "read: guest_fd=%d sabfs_fd=%d", guest_fd, sabfs_fd);
-            syscall_sabfs_log(dbg);
-
             if (sabfs_fd < 0) {
                 return 0;  /* Not a SABFS fd, let kernel handle */
             }
@@ -367,31 +366,13 @@ static int sabfs_try_intercept(CPUX86State *env, int next_eip_addend)
             int count = arg3;
             if (count > 65536) count = 65536;  /* Limit buffer size */
 
-            /* Allocate temporary buffer for SABFS read */
             uint8_t *tmp = g_malloc(count);
             if (!tmp) {
                 env->regs[R_EAX] = -12;  /* -ENOMEM */
             } else {
                 int n = syscall_sabfs_read(sabfs_fd, tmp, count);
-                snprintf(dbg, sizeof(dbg), "read result: n=%d buf=%p guest_addr=0x%lx", n, tmp, (unsigned long)arg2);
-                syscall_sabfs_log(dbg);
                 if (n > 0) {
-                    /* Log first 32 bytes in hex */
-                    int show = n > 32 ? 32 : n;
-                    char hex[128];
-                    int pos = 0;
-                    for (int i = 0; i < show && pos < 120; i++) {
-                        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", tmp[i]);
-                    }
-                    syscall_sabfs_log(hex);
-                    snprintf(dbg, sizeof(dbg), "write_guest_buffer: addr=0x%lx len=%d", (unsigned long)arg2, n);
-                    syscall_sabfs_log(dbg);
                     write_guest_buffer(env, arg2, tmp, n);
-                    syscall_sabfs_log("write_guest_buffer completed");
-                    /* Verify write by reading back */
-                    uint8_t verify = cpu_ldub_data(env, arg2);
-                    snprintf(dbg, sizeof(dbg), "verify first byte: wrote=%02x read=%02x", tmp[0], verify);
-                    syscall_sabfs_log(dbg);
                 }
                 env->regs[R_EAX] = n;
                 g_free(tmp);

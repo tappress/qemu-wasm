@@ -25,6 +25,100 @@
 #include "exec/address-spaces.h"
 #include "exec/exec-all.h"
 #include "tcg/helper-tcg.h"
+#include "standard-headers/asm-x86/kvm_para.h"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
+/*
+ * Paravirtualized clock (pvclock/kvmclock) support for TCG
+ * Allows guest to read time from shared memory page using real wall clock.
+ */
+
+#define PVCLOCK_TSC_STABLE_BIT  (1 << 0)
+
+struct pvclock_vcpu_time_info {
+    uint32_t   version;
+    uint32_t   pad0;
+    uint64_t   tsc_timestamp;
+    uint64_t   system_time;
+    uint32_t   tsc_to_system_mul;
+    int8_t     tsc_shift;
+    uint8_t    flags;
+    uint8_t    pad[2];
+} __attribute__((__packed__));
+
+struct pvclock_wall_clock {
+    uint32_t   version;
+    uint32_t   sec;
+    uint32_t   nsec;
+} __attribute__((__packed__));
+
+/* Get real wall clock time in nanoseconds */
+static uint64_t get_real_time_ns(void)
+{
+#ifdef __EMSCRIPTEN__
+    /* Use performance.now() for high-resolution time in browser */
+    double ms = emscripten_get_now();
+    return (uint64_t)(ms * 1000000.0);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+#endif
+}
+
+/* Update pvclock shared page - called on MSR write */
+static void pvclock_update_time(CPUX86State *env)
+{
+    struct pvclock_vcpu_time_info pvti;
+    hwaddr pvti_pa;
+    uint64_t time_ns;
+
+    if (!(env->system_time_msr & 1ULL)) {
+        return;
+    }
+
+    pvti_pa = env->system_time_msr & ~1ULL;
+    time_ns = get_real_time_ns();
+
+    memset(&pvti, 0, sizeof(pvti));
+    pvti.version = 2;
+    pvti.tsc_timestamp = 0;  /* Base TSC = 0 */
+    pvti.system_time = time_ns;
+    /*
+     * Set mul/shift so that time = system_time (TSC is ignored).
+     * Guest formula: time = ((tsc - tsc_timestamp) * mul >> 32) + system_time
+     * With mul=0, this simplifies to: time = system_time
+     */
+    pvti.tsc_to_system_mul = 0;
+    pvti.tsc_shift = 0;
+    pvti.flags = PVCLOCK_TSC_STABLE_BIT;
+
+    cpu_physical_memory_write(pvti_pa, &pvti, sizeof(pvti));
+}
+
+static void pvclock_update_wall_clock(CPUX86State *env)
+{
+    struct pvclock_wall_clock wc;
+    hwaddr wc_pa;
+    uint64_t time_ns;
+
+    wc_pa = env->wall_clock_msr;
+    if (!wc_pa) {
+        return;
+    }
+
+    time_ns = get_real_time_ns();
+
+    memset(&wc, 0, sizeof(wc));
+    wc.version = 2;
+    wc.sec = time_ns / 1000000000ULL;
+    wc.nsec = time_ns % 1000000000ULL;
+
+    cpu_physical_memory_write(wc_pa, &wc, sizeof(wc));
+}
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
 {
@@ -289,6 +383,19 @@ void helper_wrmsr(CPUX86State *env)
         env->msr_bndcfgs = val;
         cpu_sync_bndcs_hflags(env);
         break;
+    /* KVM paravirtualized clock MSRs */
+    case MSR_KVM_SYSTEM_TIME:
+    case MSR_KVM_SYSTEM_TIME_NEW:
+        env->system_time_msr = val;
+        if (val & 1ULL) {
+            pvclock_update_time(env);
+        }
+        break;
+    case MSR_KVM_WALL_CLOCK:
+    case MSR_KVM_WALL_CLOCK_NEW:
+        env->wall_clock_msr = val;
+        pvclock_update_wall_clock(env);
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
@@ -455,6 +562,17 @@ void helper_rdmsr(CPUX86State *env)
         val = (cs->nr_threads * cs->nr_cores) | (cs->nr_cores << 16);
         break;
     }
+    /* KVM paravirtualized clock MSRs */
+    case MSR_KVM_SYSTEM_TIME:
+    case MSR_KVM_SYSTEM_TIME_NEW:
+        /* Update time before returning the MSR value */
+        pvclock_update_time(env);
+        val = env->system_time_msr;
+        break;
+    case MSR_KVM_WALL_CLOCK:
+    case MSR_KVM_WALL_CLOCK_NEW:
+        val = env->wall_clock_msr;
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +

@@ -6464,11 +6464,12 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
     }
     case 0x40000000:
         /*
-         * CPUID code in kvm_arch_init_vcpu() ignores stuff
-         * set here, but we restrict to TCG none the less.
+         * Return KVM hypervisor signature so Linux uses kvmclock.
+         * This enables accurate wall-clock time in browser emulation.
+         * Enabled for both native and WASM so snapshots use kvmclock.
          */
-        if (tcg_enabled() && cpu->expose_tcg) {
-            memcpy(signature, "TCGTCGTCGTCG", 12);
+        if (tcg_enabled()) {
+            memcpy(signature, "KVMKVMKVM\0\0\0", 12);
             *eax = 0x40000001;
             *ebx = signature[0];
             *ecx = signature[1];
@@ -6481,7 +6482,16 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         }
         break;
     case 0x40000001:
-        *eax = 0;
+        /*
+         * KVM features - enable clocksource for accurate time.
+         * Bit 0: KVM_FEATURE_CLOCKSOURCE (old MSR)
+         * Bit 3: KVM_FEATURE_CLOCKSOURCE2 (new MSR)
+         */
+        if (tcg_enabled()) {
+            *eax = (1 << 0) | (1 << 3);  /* clocksource + clocksource2 */
+        } else {
+            *eax = 0;
+        }
         *ebx = 0;
         *ecx = 0;
         *edx = 0;
